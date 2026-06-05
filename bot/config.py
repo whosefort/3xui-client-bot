@@ -14,7 +14,9 @@ def _ids(raw: str) -> list[int]:
 
 
 def _int_list(raw: str) -> list[int]:
-    return [int(x) for x in raw.replace(" ", "").split(",") if x]
+    # strip non-ASCII garbage (invisible bytes, BOM, replacement chars from heredoc/SSH encoding)
+    clean = "".join(c for c in raw if c.isdigit() or c in ", ")
+    return [int(x) for x in clean.replace(" ", "").split(",") if x]
 
 
 @dataclass
