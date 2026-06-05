@@ -102,3 +102,11 @@ def settings_kb() -> InlineKeyboardMarkup:
     kb.button(text="✏️ Изменить реквизиты", callback_data="set:req")
     kb.adjust(1)
     return kb.as_markup()
+
+
+def broadcast_confirm_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Разослать всем", callback_data="bc:send")
+    kb.button(text="✖️ Отмена", callback_data="bc:cancel")
+    kb.adjust(1)
+    return kb.as_markup()

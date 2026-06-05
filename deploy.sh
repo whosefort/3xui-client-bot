@@ -214,7 +214,11 @@ fi
 # ─── права на файлы ───────────────────────────────────────────────────────────
 chmod 600 .env
 mkdir -p data && chmod 700 data
-ok "chmod 600 .env, chmod 700 data/"
+# Контейнер работает от uid 10001 (non-root) — отдаём ему владение data/,
+# иначе он не сможет писать SQLite в смонтированный том.
+chown -R 10001:10001 data 2>/dev/null \
+    && ok "chmod 600 .env, chmod 700 data/, chown 10001 data/" \
+    || warn "chmod 600 .env, chmod 700 data/ (chown пропущен — нужен root)"
 
 # ─── итоговая проверка .env ───────────────────────────────────────────────────
 MISSING=()

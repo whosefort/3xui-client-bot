@@ -19,8 +19,9 @@ from aiogram.types import CallbackQuery, Message
 
 from .. import db, keyboards as kb, texts
 from ..config import config
-from ..keyboards import (admin_kb, admin_decision, client_card_kb,
-                         clients_list_kb, confirm_delete_kb, settings_kb)
+from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
+                         client_card_kb, clients_list_kb, confirm_delete_kb,
+                         settings_kb)
 from ..runtime import get_bot, get_xui
 from .common import sub_link
 
@@ -34,7 +35,8 @@ router.callback_query.filter(F.from_user.id.in_(config.admin_ids))
 
 class AdminFSM(StatesGroup):
     grant = State()
-    broadcast = State()
+    broadcast = State()          # ждём текст рассылки
+    broadcast_confirm = State()  # текст получен, ждём подтверждения
     set_price = State()
     set_req = State()
 
@@ -172,9 +174,16 @@ async def cb_decision(cb: CallbackQuery) -> None:
             await _approve_new(req)
         else:
             await _approve_renew(req)
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
+        # Заявка НАМЕРЕННО остаётся pending — чтобы можно было повторить после
+        # устранения причины (панель прилегла и т.п.). Чтобы не зависала молча,
+        # явно подсказываем админу про кнопку «Отклонить» (она тоже снимает pending).
         log.exception("Ошибка подтверждения заявки %s", req_id)
-        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        await cb.answer(
+            "Не удалось подтвердить (панель недоступна?). "
+            "Повторите позже или нажмите «Отклонить».",
+            show_alert=True,
+        )
         return
 
     db.decide_request(req_id, "approved", cb.from_user.id)
@@ -200,7 +209,12 @@ async def _approve_renew(req) -> None:
     tg_id = req["tg_id"]
     client = await xui.find_by_tgid(tg_id)
     if not client:
-        raise RuntimeError("Клиент с таким tgId не найден в панели")
+        # Заявка на продление, но клиента в панели нет (старый клиент без tgId,
+        # удалённый, или поддельный paid:renew). Не падаем в RuntimeError, из-за
+        # которого заявка вечно висела pending — просто выдаём новую подписку.
+        log.info("renew без клиента tg_id=%s → выдаём новую подписку", tg_id)
+        await _approve_new(req)
+        return
     res = await xui.extend_client(client=client, add_days=config.plan_days)
     days = xui.days_left({"expiryTime": res["expiry_ms"]})
     await _safe_user_msg(tg_id, texts.renewed(days if days is not None else config.plan_days))
@@ -467,25 +481,66 @@ async def set_req_input(message: Message, state: FSMContext) -> None:
 async def kb_broadcast(message: Message, state: FSMContext) -> None:
     await state.set_state(AdminFSM.broadcast)
     await message.answer(
-        "📢 Пришлите текст рассылки одним сообщением — отправлю всем клиентам.\n"
-        "Для отмены — любая кнопка снизу."
+        "📢 Пришлите текст рассылки одним сообщением — покажу предпросмотр "
+        "и спрошу подтверждение перед отправкой.\nДля отмены — любая кнопка снизу."
     )
 
 
 @router.message(AdminFSM.broadcast, F.text)
 async def broadcast_input(message: Message, state: FSMContext) -> None:
-    await state.clear()
+    # Текст НЕ рассылаем сразу — сначала предпросмотр и явное подтверждение,
+    # чтобы случайное сообщение не улетело всем клиентам.
     text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пустой текст — отменено.")
+        await state.clear()
+        return
+    await state.set_state(AdminFSM.broadcast_confirm)
+    await state.update_data(broadcast_text=text)
+    count = len(db.all_linked_users())
+    await message.answer(
+        f"📢 <b>Предпросмотр рассылки</b> (получателей: {count}):\n"
+        f"━━━━━━━━━━━━━━\n{html.escape(text)}\n━━━━━━━━━━━━━━\n"
+        f"Отправить всем?",
+        reply_markup=broadcast_confirm_kb(),
+    )
+
+
+@router.callback_query(AdminFSM.broadcast_confirm, F.data == "bc:send")
+async def cb_broadcast_send(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    text = (data.get("broadcast_text") or "").strip()
+    if not text:
+        await cb.answer("Текст потерян, начните заново", show_alert=True)
+        return
+    await cb.message.edit_text("📢 Рассылаю…")
+    sent, failed = await _do_broadcast(text)
+    await cb.message.edit_text(f"📢 Готово. Доставлено: {sent}, ошибок: {failed}")
+    await cb.answer()
+
+
+@router.callback_query(AdminFSM.broadcast_confirm, F.data == "bc:cancel")
+async def cb_broadcast_cancel(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cb.message.edit_text("✖️ Рассылка отменена.")
+    await cb.answer()
+
+
+async def _do_broadcast(text: str) -> tuple[int, int]:
+    """Разослать текст всем привязанным клиентам. Экранируем HTML, чтобы символы
+    < > & в обычном тексте не ломали parse_mode=HTML и доставку всем сразу."""
+    safe = html.escape(text)
     bot = get_bot()
     sent = failed = 0
     for user in db.all_linked_users():
         try:
-            await bot.send_message(user["tg_id"], text)
+            await bot.send_message(user["tg_id"], safe)
             sent += 1
         except Exception:  # noqa: BLE001
             failed += 1
         await asyncio.sleep(0.05)  # ~20 msg/sec, в пределах лимитов Telegram
-    await message.answer(f"📢 Готово. Доставлено: {sent}, ошибок: {failed}")
+    return sent, failed
 
 
 # =====================================================================
@@ -527,15 +582,7 @@ async def cmd_broadcast(message: Message) -> None:
     if not text:
         await message.answer("Использование: /broadcast Текст всем клиентам")
         return
-    bot = get_bot()
-    sent = failed = 0
-    for user in db.all_linked_users():
-        try:
-            await bot.send_message(user["tg_id"], text)
-            sent += 1
-        except Exception:  # noqa: BLE001
-            failed += 1
-        await asyncio.sleep(0.05)
+    sent, failed = await _do_broadcast(text)
     await message.answer(f"📢 Рассылка завершена. Доставлено: {sent}, ошибок: {failed}")
 
 

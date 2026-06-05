@@ -21,6 +21,12 @@ def init(db_path: str) -> None:
     global _conn
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     _conn = sqlite3.connect(db_path, check_same_thread=False)
+    # Файл БД содержит sub-ссылки клиентов (секрет) — жёстко закрываем права
+    # на уровне кода, не полагаясь только на дисциплину деплоя (600 = только владелец).
+    try:
+        os.chmod(db_path, 0o600)
+    except OSError:
+        pass
     _conn.row_factory = sqlite3.Row
     _conn.executescript(
         """
