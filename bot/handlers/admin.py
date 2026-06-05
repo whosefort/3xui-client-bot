@@ -333,6 +333,12 @@ async def cb_cli_tog(cb: CallbackQuery) -> None:
         return
     new_state = not cl.get("enable", True)
     await xui.set_enabled(client=cl, enabled=new_state)
+    tgid = int(cl.get("tgId") or 0)
+    if tgid > 0:
+        await _safe_user_msg(tgid, (
+            "✅ Доступ к VPN возобновлён." if new_state
+            else "⏸ Доступ к VPN приостановлен. По вопросам — кнопка «Связаться»."
+        ))
     await _show_card(cb, email)
     await cb.answer("Включён" if new_state else "Выключен")
 
@@ -367,11 +373,17 @@ async def cb_cli_del(cb: CallbackQuery) -> None:
 async def cb_cli_delok(cb: CallbackQuery) -> None:
     email = cb.data.split(":", 2)[2]
     xui = get_xui()
+    # Узнаём tgId ДО удаления, чтобы потом уведомить пользователя.
+    cl = await xui.find_by_email(email)
+    tgid = int(cl.get("tgId") or 0) if cl else 0
     try:
         await xui.delete_client(email)
-    except Exception as e:  # noqa: BLE001
-        await cb.answer(f"Ошибка: {e}", show_alert=True)
+    except Exception:  # noqa: BLE001
+        log.exception("Ошибка удаления клиента %s", email)
+        await cb.answer("Не удалось удалить (панель недоступна?). См. логи.", show_alert=True)
         return
+    if tgid > 0:
+        await _safe_user_msg(tgid, "⛔️ Ваша подписка завершена. Для возобновления — «Купить подписку».")
     text, markup = await _list_text_markup()
     await cb.message.edit_text(f"✅ Удалён <code>{html.escape(email)}</code>.\n\n" + text,
                                reply_markup=markup)
@@ -391,15 +403,23 @@ async def kb_grant(message: Message, state: FSMContext) -> None:
     )
 
 
+def _parse_tgid(arg: str) -> int | None:
+    """Только положительный tg_id. Отсекает 0 и отрицательные — иначе /grant 0
+    цепляет первого непривязанного клиента, а /grant -N плодит мусор в панели."""
+    arg = (arg or "").strip()
+    if arg.isdigit() and int(arg) > 0:
+        return int(arg)
+    return None
+
+
 @router.message(AdminFSM.grant, F.text)
 async def grant_input(message: Message, state: FSMContext) -> None:
     await state.clear()
-    arg = (message.text or "").strip()
-    if not arg.lstrip("-").isdigit():
-        await message.answer("Это не похоже на tg_id (нужны только цифры). Отменено.")
+    tg_id = _parse_tgid(message.text or "")
+    if tg_id is None:
+        await message.answer("Нужен положительный числовой tg_id (например 123456789). Отменено.")
         return
-    result = await _do_grant(int(arg))
-    await message.answer(result)
+    await message.answer(await _do_grant(tg_id))
 
 
 async def _do_grant(tg_id: int) -> str:
@@ -423,9 +443,9 @@ async def _do_grant(tg_id: int) -> str:
         await _safe_user_msg(tg_id, texts.new_subscription_issued(
             config.plan_days, sub_link(created["sub_id"])))
         return f"✅ Создана подписка для {tg_id}"
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         log.exception("grant failed")
-        return f"❌ Ошибка: {e}"
+        return "❌ Ошибка панели — не удалось выдать/продлить. Подробности в логах."
 
 
 # =====================================================================
@@ -569,11 +589,11 @@ async def cmd_requisites(message: Message) -> None:
 
 @router.message(Command("grant"))
 async def cmd_grant(message: Message) -> None:
-    arg = (message.text or "").partition(" ")[2].strip()
-    if not arg.lstrip("-").isdigit():
-        await message.answer("Использование: /grant 123456789 (tg_id пользователя)")
+    tg_id = _parse_tgid((message.text or "").partition(" ")[2])
+    if tg_id is None:
+        await message.answer("Использование: /grant 123456789 (положительный tg_id)")
         return
-    await message.answer(await _do_grant(int(arg)))
+    await message.answer(await _do_grant(tg_id))
 
 
 @router.message(Command("broadcast"))

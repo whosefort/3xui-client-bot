@@ -63,10 +63,14 @@ async def cb_status(cb: CallbackQuery) -> None:
     sub_url = sub_link(traffics.get("subId") or "")
     days = xui.days_left(traffics)
     enabled = traffics.get("enable", True)
-    if days is None:
-        text = texts.status_unlimited(sub_url)
-    elif days <= 0 or not enabled:
+    if not enabled or (days is not None and days <= 0):
         text = texts.status_expired()
+    elif xui.is_exhausted(traffics):
+        # Срок ещё идёт, но трафик кончился — иначе юзер видел бы «активна»,
+        # а VPN не работает (ровно та путаница, ради которой делался бот).
+        text = texts.status_exhausted()
+    elif days is None:
+        text = texts.status_unlimited(sub_url)
     else:
         text = texts.status_active(days, sub_url)
     await cb.message.edit_text(text, reply_markup=main_menu(True))

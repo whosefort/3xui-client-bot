@@ -1,6 +1,8 @@
 """Тексты сообщений. Лимит трафика клиенту НЕ показываем (по требованию)."""
 from __future__ import annotations
 
+import html
+
 
 def status_active(days: int, sub_url: str) -> str:
     return (
@@ -25,6 +27,15 @@ def status_expired() -> str:
     )
 
 
+def status_exhausted() -> str:
+    # Лимит трафика клиенту не раскрываем — только факт ограничения.
+    return (
+        "⚠️ <b>Доступ временно ограничен.</b>\n"
+        "Похоже, исчерпан лимит на этот период. Напишите в поддержку "
+        "(кнопка «Связаться») — поможем разобраться."
+    )
+
+
 def status_none() -> str:
     return (
         "👋 Похоже, у вас ещё нет подписки.\n"
@@ -33,10 +44,12 @@ def status_none() -> str:
 
 
 def buy_offer(price: str, days: int, requisites: str) -> str:
+    # price/requisites задаёт админ и хранятся в БД — экранируем, чтобы
+    # символы < > & (или вставленный тег) не ломали HTML и не подменяли текст.
     return (
         f"🛒 <b>Подписка на {days} дней</b>\n"
-        f"Цена: <b>{price} ₽</b>\n\n"
-        f"Переведите по реквизитам:\n<code>{requisites}</code>\n\n"
+        f"Цена: <b>{html.escape(price)} ₽</b>\n\n"
+        f"Переведите по реквизитам:\n<code>{html.escape(requisites)}</code>\n\n"
         f"После перевода нажмите «Я оплатил» — заявка уйдёт администратору, "
         f"он подтвердит и подписка создастся автоматически."
     )

@@ -20,6 +20,7 @@ import ssl
 import time
 import uuid
 from typing import Any, Optional
+from urllib.parse import quote
 
 import aiohttp
 
@@ -49,6 +50,11 @@ class XUIClient:
         self._verify_ssl = verify_ssl
         self._session: Optional[aiohttp.ClientSession] = None
         self._logged_in = False
+        # Короткоживущий кэш списка клиентов: гасит «громовое стадо» при спаме
+        # /status (каждый resolve_client иначе тянет полный список 1-2 раза).
+        self._clients_cache: Optional[list[dict]] = None
+        self._clients_cache_ts = 0.0
+        self._cache_ttl = 3.0  # сек
 
     # ---------- сессия / авторизация ----------
 
@@ -63,7 +69,11 @@ class XUIClient:
             headers = {}
             if self.auth == "token" and self.api_token:
                 headers["Authorization"] = f"Bearer {self.api_token}"
-            self._session = aiohttp.ClientSession(connector=connector, headers=headers)
+            # Явные таймауты: зависшая панель не должна держать корутины бота
+            # бесконечно (дефолт aiohttp по sock_read/connect не ограничен).
+            timeout = aiohttp.ClientTimeout(total=30, sock_connect=10, sock_read=20)
+            self._session = aiohttp.ClientSession(
+                connector=connector, headers=headers, timeout=timeout)
         return self._session
 
     async def _login_if_needed(self) -> None:
@@ -115,14 +125,43 @@ class XUIClient:
 
     # ---------- ЧТЕНИЕ ----------
 
-    async def list_clients(self) -> list[dict]:
-        """Все клиенты главной панели (первоклассный Clients API)."""
+    async def list_clients(self, *, force: bool = False) -> list[dict]:
+        """Все клиенты главной панели (первоклассный Clients API).
+
+        Кэшируется на _cache_ttl секунд. Возвращаем копию, чтобы вызыватели
+        (сортировка в админке и т.п.) не мутировали кэш."""
+        now = time.time()
+        if (not force and self._clients_cache is not None
+                and (now - self._clients_cache_ts) < self._cache_ttl):
+            return list(self._clients_cache)
         data = await self._request("GET", "/panel/api/clients/list")
-        return data.get("obj") or []
+        if "obj" in data:
+            clients = data.get("obj") or []
+        elif data.get("success") is True:
+            clients = []
+        else:
+            # Не маскируем странный ответ панели пустым списком (иначе админка
+            # покажет «ноль клиентов», а find_by_* молча вернут None).
+            raise XUIError("неожиданный ответ панели на list (нет поля obj)")
+        self._clients_cache = clients
+        self._clients_cache_ts = now
+        return list(clients)
+
+    def _invalidate_cache(self) -> None:
+        self._clients_cache = None
 
     async def find_by_tgid(self, tg_id: int) -> Optional[dict]:
+        # tgId<=0 — это «не привязан» (None→0). Никогда не матчим по нему, иначе
+        # find_by_tgid(0) вернёт первого попавшегося непривязанного клиента.
+        tg_id = int(tg_id)
+        if tg_id <= 0:
+            return None
         for c in await self.list_clients():
-            if int(c.get("tgId") or 0) == int(tg_id):
+            try:
+                cid = int(c.get("tgId") or 0)
+            except (TypeError, ValueError):
+                continue
+            if cid > 0 and cid == tg_id:
                 return c
         return None
 
@@ -156,6 +195,7 @@ class XUIClient:
         }
         await self._request("POST", "/panel/api/clients/add",
                             json_body={"client": client, "inboundIds": list(inbound_ids)})
+        self._invalidate_cache()
         return {"email": email, "sub_id": sub_id, "expiry_ms": client["expiryTime"]}
 
     async def extend_client(self, *, client: dict, add_days: int) -> dict:
@@ -167,18 +207,21 @@ class XUIClient:
         body = self._writable(client)
         body["expiryTime"] = new_exp
         body["enable"] = True
-        await self._request("POST", f"/panel/api/clients/update/{client['email']}",
+        await self._request("POST", f"/panel/api/clients/update/{quote(client['email'], safe='')}",
                             json_body=body)
+        self._invalidate_cache()
         return {"expiry_ms": new_exp}
 
     async def set_enabled(self, *, client: dict, enabled: bool) -> None:
         body = self._writable(client)
         body["enable"] = enabled
-        await self._request("POST", f"/panel/api/clients/update/{client['email']}",
+        await self._request("POST", f"/panel/api/clients/update/{quote(client['email'], safe='')}",
                             json_body=body)
+        self._invalidate_cache()
 
     async def delete_client(self, email: str) -> None:
-        await self._request("POST", f"/panel/api/clients/del/{email}")
+        await self._request("POST", f"/panel/api/clients/del/{quote(email, safe='')}")
+        self._invalidate_cache()
 
     @staticmethod
     def _writable(client: dict) -> dict:
@@ -194,7 +237,29 @@ class XUIClient:
 
     @staticmethod
     def days_left(client: dict) -> Optional[int]:
-        exp = int(client.get("expiryTime") or 0)
+        try:
+            exp = int(client.get("expiryTime") or 0)
+        except (TypeError, ValueError):
+            return None
         if exp <= 0:
-            return None  # бессрочно
+            return None  # бессрочно (или delayed-start — трактуем как безлимит)
         return max(0, int((exp / 1000 - time.time()) // 86400))
+
+    @staticmethod
+    def usage_bytes(client: dict) -> int:
+        t = client.get("traffic") if isinstance(client.get("traffic"), dict) else client
+        try:
+            return int(t.get("up") or 0) + int(t.get("down") or 0)
+        except (TypeError, ValueError, AttributeError):
+            return 0
+
+    @staticmethod
+    def is_exhausted(client: dict) -> bool:
+        """Достигнут ли лимит трафика. totalGB==0 => безлимит."""
+        try:
+            total = int(client.get("totalGB") or 0)
+        except (TypeError, ValueError):
+            return False
+        if total <= 0:
+            return False
+        return XUIClient.usage_bytes(client) >= total
