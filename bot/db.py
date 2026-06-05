@@ -119,6 +119,15 @@ def all_linked_users() -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def usernames_map() -> dict[int, str]:
+    """tg_id -> @username (или имя), всё что знаем из истории общения с ботом."""
+    with _lock:
+        rows = _c().execute(
+            "SELECT tg_id, tg_username FROM users WHERE tg_username IS NOT NULL"
+        ).fetchall()
+    return {r["tg_id"]: r["tg_username"] for r in rows}
+
+
 # ---------- requests ----------
 
 def create_request(tg_id: int, tg_username: str | None, type_: str) -> int:
@@ -134,6 +143,13 @@ def create_request(tg_id: int, tg_username: str | None, type_: str) -> int:
 def get_request(req_id: int) -> Optional[sqlite3.Row]:
     with _lock:
         return _c().execute("SELECT * FROM requests WHERE id=?", (req_id,)).fetchone()
+
+
+def pending_requests() -> list[sqlite3.Row]:
+    with _lock:
+        return _c().execute(
+            "SELECT * FROM requests WHERE status='pending' ORDER BY created_at"
+        ).fetchall()
 
 
 def has_pending_request(tg_id: int) -> bool:
