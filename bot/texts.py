@@ -1,0 +1,80 @@
+"""Тексты сообщений. Лимит трафика клиенту НЕ показываем (по требованию)."""
+from __future__ import annotations
+
+
+def status_active(days: int, sub_url: str) -> str:
+    return (
+        f"✅ <b>Подписка активна</b>\n"
+        f"Осталось дней: <b>{days}</b>\n\n"
+        f"🔗 Ваша ссылка-подписка:\n<code>{sub_url}</code>\n\n"
+        f"Добавьте её в приложение (v2RayTun / Hiddify / v2rayNG) — и всё заработает."
+    )
+
+
+def status_unlimited(sub_url: str) -> str:
+    return (
+        f"✅ <b>Подписка активна</b> (бессрочно)\n\n"
+        f"🔗 Ваша ссылка-подписка:\n<code>{sub_url}</code>"
+    )
+
+
+def status_expired() -> str:
+    return (
+        "⛔️ <b>Подписка закончилась.</b>\n"
+        "Нажмите «Продлить», переведите оплату и отправьте заявку — продлю вручную."
+    )
+
+
+def status_none() -> str:
+    return (
+        "👋 Похоже, у вас ещё нет подписки.\n"
+        "Нажмите «Купить подписку», чтобы оформить."
+    )
+
+
+def buy_offer(price: str, days: int, requisites: str) -> str:
+    return (
+        f"🛒 <b>Подписка на {days} дней</b>\n"
+        f"Цена: <b>{price} ₽</b>\n\n"
+        f"Переведите по реквизитам:\n<code>{requisites}</code>\n\n"
+        f"После перевода нажмите «Я оплатил» — заявка уйдёт администратору, "
+        f"он подтвердит и подписка создастся автоматически."
+    )
+
+
+def request_sent() -> str:
+    return "📨 Заявка отправлена. Как только администратор подтвердит оплату — пришлю доступ."
+
+
+def request_already_pending() -> str:
+    return "⏳ У вас уже есть заявка в обработке. Дождитесь подтверждения."
+
+
+def reminder(days: int) -> str:
+    if days <= 0:
+        return ("⛔️ <b>Сегодня заканчивается ваша подписка.</b>\n"
+                "Продлите, чтобы не потерять доступ — нажмите «Продлить».")
+    word = "день" if days == 1 else "дня" if days < 5 else "дней"
+    return (f"🔔 Напоминание: через <b>{days} {word}</b> заканчивается подписка.\n"
+            f"Чтобы не прерываться, продлите заранее — кнопка «Продлить».")
+
+
+def new_subscription_issued(days: int, sub_url: str) -> str:
+    return (
+        f"🎉 <b>Готово! Подписка на {days} дней активна.</b>\n\n"
+        f"🔗 Ваша ссылка-подписка:\n<code>{sub_url}</code>\n\n"
+        f"Откройте приложение (v2RayTun / Hiddify), импортируйте ссылку — и пользуйтесь. "
+        f"Если что-то не подключается — кнопка «Связаться»."
+    )
+
+
+def renewed(days_left: int) -> str:
+    return f"✅ Продлено! Теперь у вас <b>{days_left}</b> дней."
+
+
+def support_prompt() -> str:
+    return "✍️ Напишите сообщение одним текстом — я передам его администратору."
+
+
+def support_forwarded() -> str:
+    return "✅ Сообщение отправлено. Скоро ответят."

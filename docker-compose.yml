@@ -1,0 +1,18 @@
+# Бот ставится на тот же VPS, где крутится главная панель 3X-UI.
+# Long-polling => входящие порты НЕ нужны, наружу ничего не открываем.
+services:
+  bot:
+    build: .
+    container_name: 3xui-client-bot
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data        # SQLite переживает перезапуск/пересборку
+    # Если панель слушает на localhost хоста (127.0.0.1) — даём боту доступ
+    # к сети хоста, чтобы XUI_BASE_URL мог быть http://127.0.0.1:PORT/...
+    network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
