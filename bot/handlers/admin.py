@@ -20,8 +20,8 @@ from aiogram.types import CallbackQuery, Message
 from .. import db, keyboards as kb, texts
 from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
-                         client_card_kb, clients_list_kb, confirm_delete_kb,
-                         settings_kb)
+                         broadcast_target_kb, client_card_kb, clients_list_kb,
+                         confirm_delete_kb, settings_kb)
 from ..runtime import get_bot, get_xui
 from .common import sub_link
 
@@ -35,8 +35,10 @@ router.callback_query.filter(F.from_user.id.in_(config.admin_ids))
 
 class AdminFSM(StatesGroup):
     grant = State()
+    broadcast_ids = State()      # ждём список получателей (для адресной рассылки)
     broadcast = State()          # ждём текст рассылки
     broadcast_confirm = State()  # текст получен, ждём подтверждения
+    card_msg = State()           # ждём текст личного сообщения конкретному клиенту
     set_price = State()
     set_req = State()
 
@@ -358,6 +360,43 @@ async def cb_cli_lnk(cb: CallbackQuery) -> None:
     await cb.answer()
 
 
+@router.callback_query(F.data.startswith("cli:msg:"))
+async def cb_cli_msg(cb: CallbackQuery, state: FSMContext) -> None:
+    email = cb.data.split(":", 2)[2]
+    cl = await get_xui().find_by_email(email)
+    if not cl:
+        await cb.answer("Клиент не найден", show_alert=True)
+        return
+    tgid = int(cl.get("tgId") or 0)
+    if tgid <= 0:
+        await cb.answer("У клиента не задан tgId — писать некому", show_alert=True)
+        return
+    await state.set_state(AdminFSM.card_msg)
+    await state.update_data(msg_tgid=tgid)
+    await cb.message.answer(
+        f"✉️ Пришлите текст — отправлю клиенту <b>{html.escape(_label(cl, db.usernames_map()))}</b>.\n"
+        f"Для отмены — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.card_msg, F.text)
+async def card_msg_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    tgid = int(data.get("msg_tgid") or 0)
+    text = (message.text or "").strip()
+    if tgid <= 0 or not text:
+        await message.answer("Отменено.")
+        return
+    try:
+        await get_bot().send_message(tgid, html.escape(text))  # escape: см. #8
+        await message.answer("✅ Отправлено.")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Личное сообщение не доставлено %s: %s", tgid, e)
+        await message.answer("⚠️ Не доставлено (клиент не запускал бота или заблокировал).")
+
+
 @router.callback_query(F.data.startswith("cli:del:"))
 async def cb_cli_del(cb: CallbackQuery) -> None:
     email = cb.data.split(":", 2)[2]
@@ -528,29 +567,87 @@ async def set_req_input(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == kb.ADM_BROADCAST)
 async def kb_broadcast(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("📢 Кому отправить рассылку?", reply_markup=broadcast_target_kb())
+
+
+@router.callback_query(F.data == "bc:all")
+async def cb_bc_all(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminFSM.broadcast)
+    await state.update_data(recipients=None)   # None = всем привязанным
+    await cb.message.edit_text(
+        "📢 Рассылка <b>всем</b>. Пришлите текст одним сообщением.\n"
+        "Покажу предпросмотр и спрошу подтверждение. Отмена — кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "bc:some")
+async def cb_bc_some(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminFSM.broadcast_ids)
+    await cb.message.edit_text(
+        "🎯 Пришлите получателей: <b>tg_id</b> через пробел или запятую "
+        "(можно <b>@username</b> тех, кто писал боту).\nОтмена — кнопка снизу."
+    )
+    await cb.answer()
+
+
+def _resolve_recipients(raw: str) -> tuple[list[int], list[str]]:
+    """Разобрать строку в список tg_id. Поддержка @username для тех, кто писал боту."""
+    umap = db.usernames_map()  # tg_id -> "@name"/"name"
+    rev = {str(u).lstrip("@").lower(): tid for tid, u in umap.items()}
+    ids: list[int] = []
+    unknown: list[str] = []
+    seen: set[int] = set()
+    for tok in raw.replace(",", " ").split():
+        if tok.isdigit() and int(tok) > 0:
+            v = int(tok)
+        else:
+            v = rev.get(tok.lstrip("@").lower())
+        if v and v not in seen:
+            seen.add(v)
+            ids.append(v)
+        elif not v:
+            unknown.append(tok)
+    return ids, unknown
+
+
+@router.message(AdminFSM.broadcast_ids, F.text)
+async def broadcast_ids_input(message: Message, state: FSMContext) -> None:
+    ids, unknown = _resolve_recipients(message.text or "")
+    if not ids:
+        await state.clear()
+        await message.answer(
+            "Не распознал ни одного получателя. Отменено.\n"
+            "Нужны tg_id через пробел/запятую (или @username тех, кто писал боту)."
+        )
+        return
+    await state.update_data(recipients=ids)
+    await state.set_state(AdminFSM.broadcast)
+    note = f"\n⚠️ Не распознаны: {html.escape(' '.join(unknown))}" if unknown else ""
     await message.answer(
-        "📢 Пришлите текст рассылки одним сообщением — покажу предпросмотр "
-        "и спрошу подтверждение перед отправкой.\nДля отмены — любая кнопка снизу."
+        f"🎯 Получателей: <b>{len(ids)}</b>.{note}\nТеперь пришлите текст сообщения."
     )
 
 
 @router.message(AdminFSM.broadcast, F.text)
 async def broadcast_input(message: Message, state: FSMContext) -> None:
     # Текст НЕ рассылаем сразу — сначала предпросмотр и явное подтверждение,
-    # чтобы случайное сообщение не улетело всем клиентам.
+    # чтобы случайное сообщение не улетело получателям.
     text = (message.text or "").strip()
     if not text:
         await message.answer("Пустой текст — отменено.")
         await state.clear()
         return
-    await state.set_state(AdminFSM.broadcast_confirm)
+    data = await state.get_data()
+    recipients = data.get("recipients")  # None = всем
     await state.update_data(broadcast_text=text)
-    count = len(db.all_linked_users())
+    await state.set_state(AdminFSM.broadcast_confirm)
+    count = len(recipients) if recipients else len(db.all_linked_users())
+    whom = f"выбранным ({count})" if recipients else f"всем ({count})"
     await message.answer(
-        f"📢 <b>Предпросмотр рассылки</b> (получателей: {count}):\n"
-        f"━━━━━━━━━━━━━━\n{html.escape(text)}\n━━━━━━━━━━━━━━\n"
-        f"Отправить всем?",
+        f"📢 <b>Предпросмотр</b> — отправка {whom}:\n"
+        f"━━━━━━━━━━━━━━\n{html.escape(text)}\n━━━━━━━━━━━━━━\nОтправить?",
         reply_markup=broadcast_confirm_kb(),
     )
 
@@ -560,11 +657,12 @@ async def cb_broadcast_send(cb: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     await state.clear()
     text = (data.get("broadcast_text") or "").strip()
+    recipients = data.get("recipients")
     if not text:
         await cb.answer("Текст потерян, начните заново", show_alert=True)
         return
     await cb.message.edit_text("📢 Рассылаю…")
-    sent, failed = await _do_broadcast(text)
+    sent, failed = await _do_broadcast(text, recipients)
     await cb.message.edit_text(f"📢 Готово. Доставлено: {sent}, ошибок: {failed}")
     await cb.answer()
 
@@ -576,15 +674,16 @@ async def cb_broadcast_cancel(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
 
 
-async def _do_broadcast(text: str) -> tuple[int, int]:
-    """Разослать текст всем привязанным клиентам. Экранируем HTML, чтобы символы
-    < > & в обычном тексте не ломали parse_mode=HTML и доставку всем сразу."""
+async def _do_broadcast(text: str, recipients: list[int] | None = None) -> tuple[int, int]:
+    """Разослать текст. recipients=None → всем привязанным; иначе только указанным.
+    Экранируем HTML, чтобы < > & в тексте не ломали parse_mode=HTML и доставку."""
     safe = html.escape(text)
     bot = get_bot()
+    targets = recipients if recipients else [u["tg_id"] for u in db.all_linked_users()]
     sent = failed = 0
-    for user in db.all_linked_users():
+    for tg_id in targets:
         try:
-            await bot.send_message(user["tg_id"], safe)
+            await bot.send_message(tg_id, safe)
             sent += 1
         except Exception:  # noqa: BLE001
             failed += 1

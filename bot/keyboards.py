@@ -82,9 +82,10 @@ def client_card_kb(email: str, enabled: bool) -> InlineKeyboardMarkup:
     kb.button(text=("⛔️ Выключить" if enabled else "✅ Включить"),
               callback_data=f"cli:tog:{email}")
     kb.button(text="🔗 Ссылка", callback_data=f"cli:lnk:{email}")
+    kb.button(text="✉️ Написать", callback_data=f"cli:msg:{email}")
     kb.button(text="🗑 Удалить", callback_data=f"cli:del:{email}")
     kb.button(text="↩️ К списку", callback_data="cli:list")
-    kb.adjust(2, 2, 1)
+    kb.adjust(2, 2, 2)
     return kb.as_markup()
 
 
@@ -107,9 +108,17 @@ def settings_kb(backup_btn: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def broadcast_target_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📢 Всем клиентам", callback_data="bc:all")
+    kb.button(text="🎯 Выбранным (по списку)", callback_data="bc:some")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def broadcast_confirm_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Разослать всем", callback_data="bc:send")
+    kb.button(text="✅ Отправить", callback_data="bc:send")
     kb.button(text="✖️ Отмена", callback_data="bc:cancel")
     kb.adjust(1)
     return kb.as_markup()
