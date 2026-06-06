@@ -67,8 +67,15 @@ async def reminders_sweep() -> None:
 async def heartbeat() -> None:
     if not config.admin_ids:
         return
+    msg = "💚 Бот жив, напоминания работают."
+    # Суточный бэкап привязан к отбивке: так он наблюдаем — каждый день видно,
+    # что копия реально ушла в R2, и сразу заметно, если перестало.
+    if config.backup_enabled:
+        from . import backup
+        status = await backup.run_backup()
+        msg += f"\n💾 Бэкап: {status}"
     try:
-        await get_bot().send_message(config.admin_ids[0], "💚 Бот жив, напоминания работают.")
+        await get_bot().send_message(config.admin_ids[0], msg)
     except Exception as e:  # noqa: BLE001
         log.warning("Heartbeat не отправлен: %s", e)
 

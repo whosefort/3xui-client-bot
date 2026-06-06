@@ -96,10 +96,13 @@ def confirm_delete_kb(email: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def settings_kb() -> InlineKeyboardMarkup:
+def settings_kb(backup_btn: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✏️ Изменить цену", callback_data="set:price")
     kb.button(text="✏️ Изменить реквизиты", callback_data="set:req")
+    if backup_btn:                       # показываем только если бэкап включён в .env
+        kb.button(text=backup_btn, callback_data="bk:toggle")
+        kb.button(text="💾 Сделать бэкап сейчас", callback_data="bk:now")
     kb.adjust(1)
     return kb.as_markup()
 

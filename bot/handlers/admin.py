@@ -452,16 +452,45 @@ async def _do_grant(tg_id: int) -> str:
 #  ЦЕНА / РЕКВИЗИТЫ
 # =====================================================================
 
+def _settings_text_markup():
+    price = db.get_setting("price", config.default_price)
+    req = db.get_setting("requisites", config.default_requisites) or "(не заданы)"
+    text = (f"💳 Цена: <b>{html.escape(price)} ₽</b> за {config.plan_days} дн.\n"
+            f"🏦 Реквизиты:\n<code>{html.escape(req)}</code>")
+    backup_btn = None
+    if config.backup_enabled:
+        paused = db.get_setting("backup_paused", "0") == "1"
+        state_str = "⏸ на паузе" if paused else "✅ включён (R2, ежедневно)"
+        text += f"\n💾 Бэкап: {state_str}"
+        backup_btn = "▶️ Включить бэкап" if paused else "⏸ Выключить бэкап"
+    else:
+        text += "\n💾 Бэкап: выключен в .env (BACKUP_ENABLED=false)"
+    return text, settings_kb(backup_btn)
+
+
 @router.message(F.text == kb.ADM_SETTINGS)
 async def kb_settings(message: Message, state: FSMContext) -> None:
     await state.clear()
-    price = db.get_setting("price", config.default_price)
-    req = db.get_setting("requisites", config.default_requisites) or "(не заданы)"
-    await message.answer(
-        f"💳 Цена: <b>{html.escape(price)} ₽</b> за {config.plan_days} дн.\n"
-        f"🏦 Реквизиты:\n<code>{html.escape(req)}</code>",
-        reply_markup=settings_kb(),
-    )
+    text, markup = _settings_text_markup()
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "bk:toggle")
+async def cb_bk_toggle(cb: CallbackQuery) -> None:
+    # One-click пауза/возобновление бэкапа (рантайм, без редеплоя).
+    paused = db.get_setting("backup_paused", "0") == "1"
+    db.set_setting("backup_paused", "0" if paused else "1")
+    text, markup = _settings_text_markup()
+    await cb.message.edit_text(text, reply_markup=markup)
+    await cb.answer("Бэкап возобновлён" if paused else "Бэкап на паузе")
+
+
+@router.callback_query(F.data == "bk:now")
+async def cb_bk_now(cb: CallbackQuery) -> None:
+    await cb.answer("Запускаю…")
+    from .. import backup
+    status = await backup.run_backup()
+    await cb.message.answer(f"💾 Бэкап вручную: {status}")
 
 
 @router.callback_query(F.data == "set:price")
@@ -594,6 +623,17 @@ async def cmd_grant(message: Message) -> None:
         await message.answer("Использование: /grant 123456789 (положительный tg_id)")
         return
     await message.answer(await _do_grant(tg_id))
+
+
+@router.message(Command("backup"))
+async def cmd_backup(message: Message) -> None:
+    if not config.backup_enabled:
+        await message.answer("Бэкап выключен в .env (BACKUP_ENABLED=false).")
+        return
+    await message.answer("💾 Делаю бэкап…")
+    from .. import backup
+    status = await backup.run_backup()
+    await message.answer(f"Бэкап: {status}")
 
 
 @router.message(Command("broadcast"))

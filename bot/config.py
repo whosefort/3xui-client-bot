@@ -32,6 +32,13 @@ def _safe_int(raw: str, default: int = 0) -> int:
         return default
 
 
+def _env_bool(key: str, default: bool = False) -> bool:
+    v = os.getenv(key, "")
+    if not v:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on", "да")
+
+
 @dataclass
 class Config:
     # Telegram
@@ -66,6 +73,14 @@ class Config:
         default_factory=lambda: _int_list(os.getenv("REMIND_DAYS_BEFORE", "3,1,0"))
     )
     remind_hour: int = _safe_int(os.getenv("REMIND_HOUR", "11"), 11)
+
+    # Бэкап в Cloudflare R2 (опционально; выключается флагом или паузой из админки)
+    backup_enabled: bool = _env_bool("BACKUP_ENABLED", False)
+    r2_endpoint: str = os.getenv("R2_ENDPOINT", "")
+    r2_bucket: str = os.getenv("R2_BUCKET", "")
+    r2_access_key_id: str = os.getenv("R2_ACCESS_KEY_ID", "")
+    r2_secret_access_key: str = os.getenv("R2_SECRET_ACCESS_KEY", "")
+    backup_age_pubkey: str = os.getenv("BACKUP_AGE_PUBKEY", "")  # публичный ключ, НЕ секрет
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.admin_ids
