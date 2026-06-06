@@ -99,39 +99,55 @@ def _r2_configured() -> bool:
                and config.r2_access_key_id and config.r2_secret_access_key)
 
 
+# Защита от наложения: ручной /backup (или кнопка) и суточный запуск не должны
+# идти одновременно.
+_lock = asyncio.Lock()
+
+
 async def run_backup() -> str:
-    """Сделать бэкап и залить в R2. Возвращает короткий статус для отбивки/админки."""
+    """Сделать бэкап и залить в R2. Возвращает короткий статус для отбивки/админки.
+    Никогда не бросает — всё заворачиваем, чтобы вызыватель (heartbeat) не падал."""
     if not config.backup_enabled:
         return "выключен (.env)"
     if db.get_setting("backup_paused", "0") == "1":
         return "⏸ на паузе"
     if not _r2_configured():
         return "⚠️ R2 не настроен (.env)"
+    if _lock.locked():
+        return "уже выполняется"
 
-    stamp = time.strftime("%Y-%m-%d", time.gmtime())
-    ts = int(time.time())
-    sources = [("bot", config.db_path)]
-    if os.path.exists(XUI_DB_PATH):
-        sources.append(("x-ui", XUI_DB_PATH))
-    else:
-        log.warning("x-ui.db не найден по %s — бэкаплю только bot.db", XUI_DB_PATH)
+    async with _lock:
+        expect_enc = bool((config.backup_age_pubkey or "").strip())
+        stamp = time.strftime("%Y-%m-%d", time.gmtime())
+        ts = int(time.time())
+        sources = [("bot", config.db_path)]
+        if os.path.exists(XUI_DB_PATH):
+            sources.append(("x-ui", XUI_DB_PATH))
+        else:
+            log.warning("x-ui.db не найден по %s — бэкаплю только bot.db", XUI_DB_PATH)
 
-    tmpdir = tempfile.mkdtemp(prefix="bk_")
-    parts, encrypted_any = [], False
-    try:
-        for name, src in sources:
-            snap = os.path.join(tmpdir, f"{name}.db")
-            await asyncio.to_thread(_snapshot, src, snap)
-            final, enc = await asyncio.to_thread(_maybe_encrypt, snap)
-            encrypted_any = encrypted_any or enc
-            size = os.path.getsize(final)
-            key = f"backups/{stamp}/{name}-{ts}.db" + (".age" if enc else "")
-            await asyncio.to_thread(_upload, final, key)
-            parts.append(f"{name} {_human(size)}")
-        lock = "🔒" if encrypted_any else "🔓"
-        return f"✅ R2 {lock} " + ", ".join(parts)
-    except Exception as e:  # noqa: BLE001
-        log.exception("backup failed")
-        return f"⚠️ ошибка: {type(e).__name__}"
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        tmpdir = None
+        parts, enc_count = [], 0
+        try:
+            tmpdir = tempfile.mkdtemp(prefix="bk_")
+            for name, src in sources:
+                snap = os.path.join(tmpdir, f"{name}.db")
+                await asyncio.to_thread(_snapshot, src, snap)
+                final, enc = await asyncio.to_thread(_maybe_encrypt, snap)
+                if enc:
+                    enc_count += 1
+                size = os.path.getsize(final)
+                key = f"backups/{stamp}/{name}-{ts}.db" + (".age" if enc else "")
+                await asyncio.to_thread(_upload, final, key)
+                parts.append(f"{name} {_human(size)}")
+            # Громко сигналим, если ждали шифрование, но что-то ушло открытым текстом.
+            if expect_enc and enc_count < len(sources):
+                return ("⚠️ ЗАЛИТО БЕЗ ШИФРОВАНИЯ — проверь age-ключ/pyrage! "
+                        + ", ".join(parts))
+            return f"✅ R2 {'🔒' if enc_count else '🔓'} " + ", ".join(parts)
+        except Exception as e:  # noqa: BLE001
+            log.exception("backup failed")
+            return f"⚠️ ошибка: {type(e).__name__}"
+        finally:
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
