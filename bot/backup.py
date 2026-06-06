@@ -120,31 +120,46 @@ async def run_backup() -> str:
         expect_enc = bool((config.backup_age_pubkey or "").strip())
         stamp = time.strftime("%Y-%m-%d", time.gmtime())
         ts = int(time.time())
+        # x-ui.db бэкапим только если это реальный непустой файл. По умолчанию в
+        # docker-compose туда подставлен /dev/null (не regular file) — тогда просто
+        # пропускаем, без ошибок и без риска создать «битую» директорию.
         sources = [("bot", config.db_path)]
-        if os.path.exists(XUI_DB_PATH):
+        if os.path.isfile(XUI_DB_PATH) and os.path.getsize(XUI_DB_PATH) > 0:
             sources.append(("x-ui", XUI_DB_PATH))
         else:
-            log.warning("x-ui.db не найден по %s — бэкаплю только bot.db", XUI_DB_PATH)
+            log.warning("x-ui.db недоступен (%s) — бэкаплю только bot.db", XUI_DB_PATH)
 
         tmpdir = None
-        parts, enc_count = [], 0
+        ok_parts, fail_parts, enc_count = [], [], 0
         try:
             tmpdir = tempfile.mkdtemp(prefix="bk_")
             for name, src in sources:
-                snap = os.path.join(tmpdir, f"{name}.db")
-                await asyncio.to_thread(_snapshot, src, snap)
-                final, enc = await asyncio.to_thread(_maybe_encrypt, snap)
-                if enc:
-                    enc_count += 1
-                size = os.path.getsize(final)
-                key = f"backups/{stamp}/{name}-{ts}.db" + (".age" if enc else "")
-                await asyncio.to_thread(_upload, final, key)
-                parts.append(f"{name} {_human(size)}")
+                # Пер-источник: падение x-ui не должно прятать успех bot и наоборот.
+                try:
+                    snap = os.path.join(tmpdir, f"{name}.db")
+                    await asyncio.to_thread(_snapshot, src, snap)
+                    final, enc = await asyncio.to_thread(_maybe_encrypt, snap)
+                    if enc:
+                        enc_count += 1
+                    size = os.path.getsize(final)
+                    key = f"backups/{stamp}/{name}-{ts}.db" + (".age" if enc else "")
+                    await asyncio.to_thread(_upload, final, key)
+                    ok_parts.append(f"{name} {_human(size)}")
+                except Exception as e:  # noqa: BLE001
+                    log.exception("backup source %s failed", name)
+                    fail_parts.append(f"{name} ⚠️{type(e).__name__}")
+
+            if not ok_parts:
+                return "⚠️ ошибка: " + ", ".join(fail_parts)
             # Громко сигналим, если ждали шифрование, но что-то ушло открытым текстом.
-            if expect_enc and enc_count < len(sources):
-                return ("⚠️ ЗАЛИТО БЕЗ ШИФРОВАНИЯ — проверь age-ключ/pyrage! "
-                        + ", ".join(parts))
-            return f"✅ R2 {'🔒' if enc_count else '🔓'} " + ", ".join(parts)
+            if expect_enc and enc_count < len(ok_parts):
+                head = "⚠️ ЗАЛИТО БЕЗ ШИФРОВАНИЯ — проверь age-ключ/pyrage!"
+            else:
+                head = f"✅ R2 {'🔒' if enc_count else '🔓'}"
+            status = f"{head} " + ", ".join(ok_parts)
+            if fail_parts:
+                status += " | НЕ удалось: " + ", ".join(fail_parts)
+            return status
         except Exception as e:  # noqa: BLE001
             log.exception("backup failed")
             return f"⚠️ ошибка: {type(e).__name__}"

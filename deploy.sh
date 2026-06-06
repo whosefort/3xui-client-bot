@@ -174,6 +174,7 @@ if [ "${SKIP_SETUP:-0}" -eq 0 ]; then
     echo -e "  ${BOLD}── Бэкап в Cloudflare R2 (опционально) ───────────────${NC}"
     BACKUP_ENABLED=false
     R2_ENDPOINT=""; R2_BUCKET=""; R2_ACCESS_KEY_ID=""; R2_SECRET_ACCESS_KEY=""; BACKUP_AGE_PUBKEY=""
+    XUI_DB_HOST_PATH=""
     read -rp "  Включить ежедневный бэкап БД в R2? [y/N] " BK
     if [[ "${BK:-N}" =~ ^[Yy]$ ]]; then
         BACKUP_ENABLED=true
@@ -184,6 +185,8 @@ if [ "${SKIP_SETUP:-0}" -eq 0 ]; then
         ask_secret  R2_SECRET_ACCESS_KEY "R2 Secret Access Key"
         echo "  age-публичный ключ для шифрования (age1...), Enter — без шифрования:"
         ask_optional BACKUP_AGE_PUBKEY "BACKUP_AGE_PUBKEY"
+        echo "  Путь к x-ui.db на хосте (Enter — без бэкапа x-ui, только bot.db):"
+        ask_optional XUI_DB_HOST_PATH "XUI_DB_HOST_PATH" "/etc/x-ui/x-ui.db"
     fi
 
     # ── Запись .env ────────────────────────────────────────────────────────────
@@ -231,6 +234,7 @@ R2_BUCKET=${R2_BUCKET}
 R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
 R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
 BACKUP_AGE_PUBKEY=${BACKUP_AGE_PUBKEY}
+XUI_DB_HOST_PATH=${XUI_DB_HOST_PATH}
 EOF
 
     ok ".env создан"
@@ -245,23 +249,27 @@ chown -R 10001:10001 data 2>/dev/null \
     && ok "chmod 600 .env, chmod 700 data/, chown 10001 data/" \
     || warn "chmod 600 .env, chmod 700 data/ (chown пропущен — нужен root)"
 
-# Если бэкап включён — дать non-root контейнеру (uid 10001) право читать x-ui.db.
-BK_ON=$(grep -E '^BACKUP_ENABLED=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | xargs 2>/dev/null || true)
-XUI_DB=/etc/x-ui/x-ui.db
-if [ "$BK_ON" = "true" ]; then
-    if [ -f "$XUI_DB" ]; then
-        command -v setfacl >/dev/null 2>&1 || apt-get install -y acl >/dev/null 2>&1 || true
-        if command -v setfacl >/dev/null 2>&1 \
-           && setfacl -m u:10001:r "$XUI_DB" 2>/dev/null \
-           && setfacl -m u:10001:x /etc/x-ui 2>/dev/null; then
-            ok "ACL: uid 10001 может читать x-ui.db (для бэкапа)"
-        elif chmod o+r "$XUI_DB" 2>/dev/null && chmod o+x /etc/x-ui 2>/dev/null; then
-            warn "ACL недоступен — выставил o+r на x-ui.db (читаемо для всех на хосте)"
-        else
-            warn "Не смог дать доступ к $XUI_DB — бэкап x-ui может не сработать (нужен root)"
-        fi
+# x-ui.db для бэкапа: путь берём из .env (XUI_DB_HOST_PATH). Если задан —
+# обязан существовать как ФАЙЛ, иначе Docker создаст на его месте битую директорию
+# и может сломать саму панель. Поэтому при отсутствии — аварийно останавливаемся.
+XUI_DB=$(grep -E '^XUI_DB_HOST_PATH=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | xargs 2>/dev/null || true)
+if [ -n "$XUI_DB" ]; then
+    if [ ! -f "$XUI_DB" ]; then
+        die "XUI_DB_HOST_PATH=$XUI_DB не найден (или не файл). Укажи верный путь в .env
+     или очисти XUI_DB_HOST_PATH (тогда x-ui не бэкапится). Иначе Docker создаст
+     битую директорию на месте файла."
+    fi
+    # Дать non-root контейнеру (uid 10001) право читать x-ui.db.
+    command -v setfacl >/dev/null 2>&1 || apt-get install -y acl >/dev/null 2>&1 || true
+    XUI_DIR=$(dirname "$XUI_DB")
+    if command -v setfacl >/dev/null 2>&1 \
+       && setfacl -m u:10001:r "$XUI_DB" 2>/dev/null \
+       && setfacl -m u:10001:x "$XUI_DIR" 2>/dev/null; then
+        ok "ACL: uid 10001 может читать x-ui.db (для бэкапа)"
+    elif chmod o+r "$XUI_DB" 2>/dev/null && chmod o+x "$XUI_DIR" 2>/dev/null; then
+        warn "ACL недоступен — выставил o+r на x-ui.db (читаемо для всех на хосте)"
     else
-        warn "Бэкап включён, но $XUI_DB не найден — проверь путь в docker-compose.yml"
+        warn "Не смог дать доступ к $XUI_DB — бэкап x-ui может не сработать (нужен root)"
     fi
 fi
 

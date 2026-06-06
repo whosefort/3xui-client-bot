@@ -100,5 +100,12 @@ class Config:
         if missing:
             raise RuntimeError(f"Не заданы обязательные переменные .env: {', '.join(missing)}")
 
+        # Бэкап опционален — не валим старт, но предупреждаем о неполной настройке.
+        if self.backup_enabled and not (self.r2_endpoint and self.r2_bucket
+                                        and self.r2_access_key_id and self.r2_secret_access_key):
+            import logging
+            logging.getLogger("config").warning(
+                "BACKUP_ENABLED=true, но R2 настроен не полностью — бэкап работать не будет")
+
 
 config = Config()

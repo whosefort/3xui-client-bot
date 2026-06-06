@@ -8,6 +8,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# pyrage (age-шифрование бэкапа) — best-effort: если под арх нет готового wheel,
+# НЕ валим сборку. Без него бэкап работает, но без шифрования (статус это покажет).
+RUN pip install --no-cache-dir "pyrage>=1.1,<2" \
+    || echo "ВНИМАНИЕ: pyrage не установлен — бэкап будет без age-шифрования"
+
 COPY bot/ ./bot/
 
 # Непривилегированный пользователь (uid 10001). Контейнер не работает от root,

@@ -679,7 +679,12 @@ async def _do_broadcast(text: str, recipients: list[int] | None = None) -> tuple
     Экранируем HTML, чтобы < > & в тексте не ломали parse_mode=HTML и доставку."""
     safe = html.escape(text)
     bot = get_bot()
-    targets = recipients if recipients else [u["tg_id"] for u in db.all_linked_users()]
+    # recipients is None → всем; иначе ровно указанным (пустой список = никому,
+    # а не «всем» — защита от случайной веерной отправки).
+    if recipients is None:
+        targets = [u["tg_id"] for u in db.all_linked_users()]
+    else:
+        targets = list(recipients)
     sent = failed = 0
     for tg_id in targets:
         try:
