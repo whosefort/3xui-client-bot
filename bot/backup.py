@@ -46,17 +46,34 @@ def _human(n: int) -> str:
 
 
 def _snapshot(src_path: str, dst_path: str) -> None:
-    """Консистентный онлайн-снимок sqlite. Источник открываем read-only —
-    безопасно даже пока 3X-UI/бот пишут в свою БД из другого процесса."""
-    src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
-    try:
-        dst = sqlite3.connect(dst_path)
+    """Онлайн-снимок sqlite.
+
+    Сначала пытаемся mode=ro (полностью консистентно, видит WAL). Если БД в
+    WAL-режиме, а у нас нет прав на её -shm/-wal (типично: x-ui.db от root,
+    бот — uid 10001), sqlite бросает 'attempt to write a readonly database'.
+    Тогда фолбэк на immutable=1 — читаем основной файл напрямую без WAL/локов.
+    Цена: незачекпойнченные транзакции в -wal не попадут (для суточного бэкапа
+    подписок несущественно, 3X-UI чекпойнтит регулярно)."""
+    last: Exception | None = None
+    for uri in (f"file:{src_path}?mode=ro", f"file:{src_path}?immutable=1"):
         try:
-            src.backup(dst)
-        finally:
-            dst.close()
-    finally:
-        src.close()
+            src = sqlite3.connect(uri, uri=True)
+            try:
+                dst = sqlite3.connect(dst_path)
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+            return
+        except sqlite3.OperationalError as e:
+            last = e
+            try:
+                os.remove(dst_path)  # убрать возможный частичный снимок перед ретраем
+            except OSError:
+                pass
+    raise last  # type: ignore[misc]
 
 
 def _maybe_encrypt(path: str) -> tuple[str, bool]:
