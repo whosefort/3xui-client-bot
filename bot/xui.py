@@ -198,8 +198,18 @@ class XUIClient:
         self._invalidate_cache()
         return {"email": email, "sub_id": sub_id, "expiry_ms": client["expiryTime"]}
 
-    async def extend_client(self, *, client: dict, add_days: int) -> dict:
-        """Продлить от текущего конца (или от сейчас, если уже истёк)."""
+    async def extend_client(self, *, client: dict, add_days: int,
+                            set_total_gb: Optional[int] = None, add_total_gb: int = 0,
+                            reset_traffic: bool = False,
+                            inbound_ids: Optional[list[int]] = None) -> dict:
+        """Продлить подписку (конец считается от текущего конца, или от сейчас если истёк).
+
+        Лимит трафика:
+          - set_total_gb задан  → ЖЁСТКО выставить лимит (ГБ). Месячное обновление: 150.
+          - иначе add_total_gb  → ПРИБАВИТЬ к текущему лимиту (ГБ). Ручное N-мес продление.
+          - оба не заданы       → лимит не трогаем.
+        reset_traffic=True → обнулить счётчик использованного (свежий месяц).
+        inbound_ids — где сбрасывать счётчик (fallback к client['inboundIds'])."""
         now_ms = int(time.time() * 1000)
         cur = int(client.get("expiryTime") or 0)
         base = cur if cur > now_ms else now_ms
@@ -207,10 +217,37 @@ class XUIClient:
         body = self._writable(client)
         body["expiryTime"] = new_exp
         body["enable"] = True
+        if set_total_gb is not None:
+            body["totalGB"] = int(set_total_gb) * 1024 ** 3
+        elif add_total_gb:
+            body["totalGB"] = int(client.get("totalGB") or 0) + int(add_total_gb) * 1024 ** 3
         await self._request("POST", f"/panel/api/clients/update/{quote(client['email'], safe='')}",
                             json_body=body)
         self._invalidate_cache()
-        return {"expiry_ms": new_exp}
+        if reset_traffic:
+            ids = [int(i) for i in (client.get("inboundIds") or inbound_ids or [])]
+            await self.reset_client_traffic(email=client["email"], inbound_ids=ids)
+        return {"expiry_ms": new_exp,
+                "total_gb_bytes": int(body.get("totalGB", client.get("totalGB") or 0))}
+
+    async def reset_client_traffic(self, *, email: str, inbound_ids: list[int]) -> int:
+        """Обнулить счётчик трафика клиента. 3X-UI считает трафик пер-инбаунд,
+        поэтому сбрасываем на каждом inbound клиента. Возвращает число успешных
+        сбросов. Несуществующий клиент на каком-то inbound — не ошибка, пропускаем."""
+        ok = 0
+        for iid in inbound_ids:
+            try:
+                await self._request(
+                    "POST",
+                    f"/panel/api/inbounds/{int(iid)}/resetClientTraffic/{quote(email, safe='')}")
+                ok += 1
+            except XUIError as e:
+                log.warning("reset traffic inbound=%s email=%s: %s", iid, email, e)
+        if ok:
+            self._invalidate_cache()
+        else:
+            log.error("reset traffic: НИ ОДИН inbound не сброшен для %s (ids=%s)", email, inbound_ids)
+        return ok
 
     async def set_enabled(self, *, client: dict, enabled: bool) -> None:
         body = self._writable(client)

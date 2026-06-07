@@ -78,14 +78,15 @@ def clients_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 
 def client_card_kb(email: str, enabled: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Продлить 30д", callback_data=f"cli:ext:{email}")
+    kb.button(text="➕ Продлить 30д", callback_data=f"cli:ext:{email}")     # месяц: сброс+150
+    kb.button(text="📅 Продлить N мес", callback_data=f"cli:extn:{email}")  # +N мес, +N×150
     kb.button(text=("⛔️ Выключить" if enabled else "✅ Включить"),
               callback_data=f"cli:tog:{email}")
     kb.button(text="🔗 Ссылка", callback_data=f"cli:lnk:{email}")
     kb.button(text="✉️ Написать", callback_data=f"cli:msg:{email}")
     kb.button(text="🗑 Удалить", callback_data=f"cli:del:{email}")
     kb.button(text="↩️ К списку", callback_data="cli:list")
-    kb.adjust(2, 2, 2)
+    kb.adjust(2, 2, 2, 1)
     return kb.as_markup()
 
 

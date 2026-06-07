@@ -39,6 +39,7 @@ class AdminFSM(StatesGroup):
     broadcast = State()          # ждём текст рассылки
     broadcast_confirm = State()  # текст получен, ждём подтверждения
     card_msg = State()           # ждём текст личного сообщения конкретному клиенту
+    card_extend = State()        # ждём число месяцев для ручного продления
     set_price = State()
     set_req = State()
 
@@ -217,7 +218,10 @@ async def _approve_renew(req) -> None:
         log.info("renew без клиента tg_id=%s → выдаём новую подписку", tg_id)
         await _approve_new(req)
         return
-    res = await xui.extend_client(client=client, add_days=config.plan_days)
+    res = await xui.extend_client(
+        client=client, add_days=config.plan_days,
+        set_total_gb=config.plan_traffic_gb, reset_traffic=True,  # свежий месяц: 150 ГБ заново
+        inbound_ids=config.default_inbound_ids)
     days = xui.days_left({"expiryTime": res["expiry_ms"]})
     await _safe_user_msg(tg_id, texts.renewed(days if days is not None else config.plan_days))
 
@@ -317,12 +321,65 @@ async def cb_cli_ext(cb: CallbackQuery) -> None:
     if not cl:
         await cb.answer("Клиент не найден", show_alert=True)
         return
-    await xui.extend_client(client=cl, add_days=config.plan_days)
+    await xui.extend_client(
+        client=cl, add_days=config.plan_days,
+        set_total_gb=config.plan_traffic_gb, reset_traffic=True,  # свежий месяц: 150 ГБ заново
+        inbound_ids=config.default_inbound_ids)
     tgid = int(cl.get("tgId") or 0)
     if tgid:
         await _safe_user_msg(tgid, texts.renewed(config.plan_days))
     await _show_card(cb, email)
-    await cb.answer(f"Продлено на {config.plan_days} дн.")
+    await cb.answer(f"Продлено на {config.plan_days} дн. (трафик сброшен)")
+
+
+@router.callback_query(F.data.startswith("cli:extn:"))
+async def cb_cli_extn(cb: CallbackQuery, state: FSMContext) -> None:
+    email = cb.data.split(":", 2)[2]
+    cl = await get_xui().find_by_email(email)
+    if not cl:
+        await cb.answer("Клиент не найден", show_alert=True)
+        return
+    await state.set_state(AdminFSM.card_extend)
+    await state.update_data(extend_email=email)
+    await cb.message.answer(
+        f"📅 На сколько <b>месяцев</b> продлить? Пришли число (1–60).\n"
+        f"За каждый месяц: +{config.plan_days} дн. срока и +{config.plan_traffic_gb} ГБ к лимиту "
+        f"(счётчик НЕ сбрасывается). Отмена — кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.card_extend, F.text)
+async def card_extend_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    email = data.get("extend_email")
+    raw = (message.text or "").strip()
+    if not (raw.isdigit() and 1 <= int(raw) <= 60):
+        await message.answer("Нужно целое число месяцев 1–60. Отменено.")
+        return
+    months = int(raw)
+    xui = get_xui()
+    cl = await xui.find_by_email(email)
+    if not cl:
+        await message.answer("Клиент не найден (удалён?).")
+        return
+    try:
+        res = await xui.extend_client(
+            client=cl, add_days=months * config.plan_days,
+            add_total_gb=months * config.plan_traffic_gb, reset_traffic=False,
+            inbound_ids=config.default_inbound_ids)
+    except Exception:  # noqa: BLE001
+        log.exception("manual extend failed")
+        await message.answer("❌ Ошибка панели — продлить не удалось. См. логи.")
+        return
+    days = xui.days_left({"expiryTime": res["expiry_ms"]})
+    tgid = int(cl.get("tgId") or 0)
+    if tgid > 0:
+        await _safe_user_msg(tgid, texts.renewed(days if days is not None else months * config.plan_days))
+    await message.answer(
+        f"✅ Продлено на {months} мес. (~{days} дн. всего, +{months * config.plan_traffic_gb} ГБ к лимиту)."
+    )
 
 
 @router.callback_query(F.data.startswith("cli:tog:"))
@@ -468,7 +525,10 @@ async def _do_grant(tg_id: int) -> str:
     try:
         existing = await xui.find_by_tgid(tg_id)
         if existing:
-            await xui.extend_client(client=existing, add_days=config.plan_days)
+            await xui.extend_client(
+                client=existing, add_days=config.plan_days,
+                set_total_gb=config.plan_traffic_gb, reset_traffic=True,  # свежий месяц
+                inbound_ids=config.default_inbound_ids)
             db.upsert_user(tg_id, uname, client_email=existing.get("email"),
                            sub_id=existing.get("subId"))
             await _safe_user_msg(tg_id, texts.renewed(config.plan_days))
