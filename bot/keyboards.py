@@ -12,6 +12,7 @@ def main_menu(has_sub: bool) -> InlineKeyboardMarkup:
         kb.button(text="🔁 Продлить", callback_data="renew")
     else:
         kb.button(text="🛒 Купить подписку", callback_data="buy")
+        kb.button(text="🔑 У меня уже есть подписка", callback_data="have_sub")
     kb.button(text="💬 Связаться", callback_data="support")
     kb.adjust(1)
     return kb.as_markup()
@@ -21,6 +22,9 @@ def confirm_paid(kind: str) -> InlineKeyboardMarkup:
     # kind: buy | renew
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Я оплатил", callback_data=f"paid:{kind}")
+    if kind == "buy":
+        # для нового клиента: вдруг ему уже выдали подписку вручную
+        kb.button(text="🔑 У меня уже есть подписка", callback_data="have_sub")
     kb.button(text="↩️ Назад", callback_data="menu")
     kb.adjust(1)
     return kb.as_markup()
@@ -84,9 +88,10 @@ def client_card_kb(email: str, enabled: bool) -> InlineKeyboardMarkup:
               callback_data=f"cli:tog:{email}")
     kb.button(text="🔗 Ссылка", callback_data=f"cli:lnk:{email}")
     kb.button(text="✉️ Написать", callback_data=f"cli:msg:{email}")
+    kb.button(text="🆔 Привязать tg_id", callback_data=f"cli:bind:{email}")
     kb.button(text="🗑 Удалить", callback_data=f"cli:del:{email}")
     kb.button(text="↩️ К списку", callback_data="cli:list")
-    kb.adjust(2, 2, 2, 1)
+    kb.adjust(2, 2, 2, 1, 1)
     return kb.as_markup()
 
 

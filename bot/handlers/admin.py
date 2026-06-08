@@ -40,6 +40,7 @@ class AdminFSM(StatesGroup):
     broadcast_confirm = State()  # текст получен, ждём подтверждения
     card_msg = State()           # ждём текст личного сообщения конкретному клиенту
     card_extend = State()        # ждём число месяцев для ручного продления
+    card_bind = State()          # ждём tg_id для ручной привязки клиента
     set_price = State()
     set_req = State()
 
@@ -452,6 +453,50 @@ async def card_msg_input(message: Message, state: FSMContext) -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("Личное сообщение не доставлено %s: %s", tgid, e)
         await message.answer("⚠️ Не доставлено (клиент не запускал бота или заблокировал).")
+
+
+@router.callback_query(F.data.startswith("cli:bind:"))
+async def cb_cli_bind(cb: CallbackQuery, state: FSMContext) -> None:
+    email = cb.data.split(":", 2)[2]
+    cl = await get_xui().find_by_email(email)
+    if not cl:
+        await cb.answer("Клиент не найден", show_alert=True)
+        return
+    await state.set_state(AdminFSM.card_bind)
+    await state.update_data(bind_email=email)
+    await cb.message.answer(
+        f"🆔 Пришлите <b>tg_id</b>, который привязать к клиенту "
+        f"<code>{html.escape(email)}</code>. Для отмены — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.card_bind, F.text)
+async def card_bind_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    email = data.get("bind_email")
+    tg_id = _parse_tgid(message.text or "")
+    if tg_id is None:
+        await message.answer("Нужен положительный числовой tg_id. Отменено.")
+        return
+    xui = get_xui()
+    cl = await xui.find_by_email(email)
+    if not cl:
+        await message.answer("Клиент не найден (удалён?).")
+        return
+    try:
+        await xui.bind_tgid(client=cl, tg_id=tg_id)
+    except Exception:  # noqa: BLE001
+        log.exception("manual bind failed")
+        await message.answer("❌ Ошибка панели — привязать не удалось. См. логи.")
+        return
+    user = db.get_user(tg_id)
+    db.upsert_user(tg_id, user["tg_username"] if user else None,
+                   client_email=cl.get("email"), sub_id=cl.get("subId"))
+    await message.answer(f"✅ Привязан tg_id <code>{tg_id}</code> к <code>{html.escape(email)}</code>.")
+    await _safe_user_msg(tg_id, "🔗 Администратор привязал вашу подписку к этому чату. "
+                                "Нажмите /start и «📊 Моя подписка».")
 
 
 @router.callback_query(F.data.startswith("cli:del:"))

@@ -171,6 +171,15 @@ class XUIClient:
                 return c
         return None
 
+    async def find_by_subid(self, sub_id: str) -> Optional[dict]:
+        sub_id = (sub_id or "").strip()
+        if not sub_id:
+            return None
+        for c in await self.list_clients():
+            if c.get("subId") == sub_id:
+                return c
+        return None
+
     # ---------- ЗАПИСЬ ----------
 
     async def create_client(self, *, tg_id: int, email: str, days: int, traffic_gb: int,
@@ -248,6 +257,15 @@ class XUIClient:
         else:
             log.error("reset traffic: НИ ОДИН inbound не сброшен для %s (ids=%s)", email, inbound_ids)
         return ok
+
+    async def bind_tgid(self, *, client: dict, tg_id: int) -> None:
+        """Проставить клиенту tgId (усыновить уже существующего клиента ботом).
+        Остальные поля (enable, лимит, срок) не трогаем."""
+        body = self._writable(client)
+        body["tgId"] = int(tg_id)
+        await self._request("POST", f"/panel/api/clients/update/{quote(client['email'], safe='')}",
+                            json_body=body)
+        self._invalidate_cache()
 
     async def set_enabled(self, *, client: dict, enabled: bool) -> None:
         body = self._writable(client)

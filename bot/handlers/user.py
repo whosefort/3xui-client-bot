@@ -24,6 +24,20 @@ class Support(StatesGroup):
     waiting = State()
 
 
+class Bind(StatesGroup):
+    waiting = State()
+
+
+def _extract_subid(text: str) -> str:
+    """Из присланной строки достать subId: принимаем как полную ссылку
+    (.../<путь>/<subId>?...), так и голый id."""
+    s = (text or "").strip()
+    s = s.split("?")[0].split("#")[0].rstrip("/")
+    if "/" in s:
+        s = s.rsplit("/", 1)[-1]
+    return s.strip()
+
+
 def _uname(msg_or_cb) -> str | None:
     u = msg_or_cb.from_user
     return ("@" + u.username) if u.username else (u.full_name or None)
@@ -108,6 +122,48 @@ async def cb_paid(cb: CallbackQuery) -> None:
     )
     await cb.message.edit_text(texts.request_sent(), reply_markup=back_to_menu())
     await cb.answer()
+
+
+# ---------- привязка существующей подписки ----------
+
+@router.callback_query(F.data == "have_sub")
+async def cb_have_sub(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Bind.waiting)
+    await cb.message.edit_text(texts.bind_prompt(), reply_markup=back_to_menu())
+    await cb.answer()
+
+
+@router.message(Bind.waiting, F.text)
+async def bind_input(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    xui = get_xui()
+    me = message.from_user.id
+    sub_id = _extract_subid(message.text)
+    if not sub_id:
+        await message.answer(texts.bind_bad_input(), reply_markup=back_to_menu())
+        return
+    client = await xui.find_by_subid(sub_id)
+    if not client:
+        await message.answer(texts.bind_not_found(), reply_markup=back_to_menu())
+        return
+    tgid = int(client.get("tgId") or 0)
+    if tgid and tgid != me:
+        # подписка уже принадлежит другому Telegram — не даём перехватить
+        await message.answer(texts.bind_taken(), reply_markup=back_to_menu())
+        await notify_admins(
+            f"⚠️ {html.escape(_uname(message) or str(me))} (id <code>{me}</code>) "
+            f"пытался привязать чужую подписку <code>{html.escape(client.get('email') or '')}</code> "
+            f"(уже за tgId <code>{tgid}</code>)."
+        )
+        return
+    await xui.bind_tgid(client=client, tg_id=me)
+    db.upsert_user(me, _uname(message),
+                   client_email=client.get("email"), sub_id=client.get("subId"))
+    await message.answer(texts.bind_ok(), reply_markup=main_menu(True))
+    await notify_admins(
+        f"🔗 {html.escape(_uname(message) or str(me))} (id <code>{me}</code>) "
+        f"привязал подписку <code>{html.escape(client.get('email') or '')}</code>."
+    )
 
 
 # ---------- поддержка ----------
