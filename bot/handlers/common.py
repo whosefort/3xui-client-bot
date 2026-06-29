@@ -19,6 +19,16 @@ def get_requisites() -> str:
     return db.get_setting("requisites", config.default_requisites)
 
 
+def get_traffic_gb() -> int:
+    """Месячный лимит трафика (ГБ). Редактируется из админки (БД), иначе из .env."""
+    raw = db.get_setting("traffic_gb", str(config.plan_traffic_gb))
+    try:
+        v = int(raw)
+        return v if v > 0 else config.plan_traffic_gb
+    except (TypeError, ValueError):
+        return config.plan_traffic_gb
+
+
 def sub_link(sub_id: str) -> str:
     return get_xui().sub_url(sub_id, template=config.sub_url_template)
 

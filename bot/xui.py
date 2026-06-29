@@ -222,7 +222,10 @@ class XUIClient:
         now_ms = int(time.time() * 1000)
         cur = int(client.get("expiryTime") or 0)
         base = cur if cur > now_ms else now_ms
-        new_exp = base + add_days * 86400 * 1000
+        # add_days может быть отрицательным (коррекция «убавить месяцы»). Клампим в
+        # «не раньше сейчас»: отрицательный expiryTime в 3X-UI = отложенный старт,
+        # его выдавать нельзя.
+        new_exp = max(base + add_days * 86400 * 1000, now_ms)
         body = self._writable(client)
         body["expiryTime"] = new_exp
         body["enable"] = True

@@ -82,8 +82,9 @@ def clients_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 
 def client_card_kb(email: str, enabled: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Продлить 30д", callback_data=f"cli:ext:{email}")     # месяц: сброс+150
-    kb.button(text="📅 Продлить N мес", callback_data=f"cli:extn:{email}")  # +N мес, +N×150
+    kb.button(text="➕ Продлить 30д", callback_data=f"cli:ext:{email}")      # месяц: сброс+лимит
+    kb.button(text="📅 Продлить N мес", callback_data=f"cli:extn:{email}")   # N мес: N×лимит+сброс
+    kb.button(text="➖ Убавить N мес", callback_data=f"cli:sub:{email}")     # коррекция срока
     kb.button(text=("⛔️ Выключить" if enabled else "✅ Включить"),
               callback_data=f"cli:tog:{email}")
     kb.button(text="🔗 Ссылка", callback_data=f"cli:lnk:{email}")
@@ -91,7 +92,7 @@ def client_card_kb(email: str, enabled: bool) -> InlineKeyboardMarkup:
     kb.button(text="🆔 Привязать tg_id", callback_data=f"cli:bind:{email}")
     kb.button(text="🗑 Удалить", callback_data=f"cli:del:{email}")
     kb.button(text="↩️ К списку", callback_data="cli:list")
-    kb.adjust(2, 2, 2, 1, 1)
+    kb.adjust(2, 2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -107,6 +108,7 @@ def settings_kb(backup_btn: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✏️ Изменить цену", callback_data="set:price")
     kb.button(text="✏️ Изменить реквизиты", callback_data="set:req")
+    kb.button(text="✏️ Лимит трафика (ГБ/мес)", callback_data="set:traffic")
     if backup_btn:                       # показываем только если бэкап включён в .env
         kb.button(text=backup_btn, callback_data="bk:toggle")
         kb.button(text="💾 Сделать бэкап сейчас", callback_data="bk:now")

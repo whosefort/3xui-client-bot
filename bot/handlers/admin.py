@@ -23,7 +23,7 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
                          confirm_delete_kb, settings_kb)
 from ..runtime import get_bot, get_xui
-from .common import sub_link
+from .common import get_traffic_gb, sub_link
 
 log = logging.getLogger("admin")
 router = Router()
@@ -40,9 +40,11 @@ class AdminFSM(StatesGroup):
     broadcast_confirm = State()  # текст получен, ждём подтверждения
     card_msg = State()           # ждём текст личного сообщения конкретному клиенту
     card_extend = State()        # ждём число месяцев для ручного продления
+    card_subtract = State()      # ждём число месяцев для коррекции (убавить срок)
     card_bind = State()          # ждём tg_id для ручной привязки клиента
     set_price = State()
     set_req = State()
+    set_traffic = State()        # ждём новый месячный лимит трафика (ГБ)
 
 
 def _client_email(tg_id: int) -> str:
@@ -201,7 +203,7 @@ async def _approve_new(req) -> None:
     email = _client_email(tg_id)
     created = await xui.create_client(
         tg_id=tg_id, email=email, days=config.plan_days,
-        traffic_gb=config.plan_traffic_gb, inbound_ids=config.default_inbound_ids,
+        traffic_gb=get_traffic_gb(), inbound_ids=config.default_inbound_ids,
     )
     db.upsert_user(tg_id, req["tg_username"], client_email=email, sub_id=created["sub_id"])
     await _safe_user_msg(tg_id, texts.new_subscription_issued(
@@ -221,7 +223,7 @@ async def _approve_renew(req) -> None:
         return
     res = await xui.extend_client(
         client=client, add_days=config.plan_days,
-        set_total_gb=config.plan_traffic_gb, reset_traffic=True,  # свежий месяц: 150 ГБ заново
+        set_total_gb=get_traffic_gb(), reset_traffic=True,  # свежий месяц: 150 ГБ заново
         inbound_ids=config.default_inbound_ids)
     days = xui.days_left({"expiryTime": res["expiry_ms"]})
     await _safe_user_msg(tg_id, texts.renewed(days if days is not None else config.plan_days))
@@ -324,7 +326,7 @@ async def cb_cli_ext(cb: CallbackQuery) -> None:
         return
     await xui.extend_client(
         client=cl, add_days=config.plan_days,
-        set_total_gb=config.plan_traffic_gb, reset_traffic=True,  # свежий месяц: 150 ГБ заново
+        set_total_gb=get_traffic_gb(), reset_traffic=True,  # свежий месяц: 150 ГБ заново
         inbound_ids=config.default_inbound_ids)
     tgid = int(cl.get("tgId") or 0)
     if tgid:
@@ -342,10 +344,11 @@ async def cb_cli_extn(cb: CallbackQuery, state: FSMContext) -> None:
         return
     await state.set_state(AdminFSM.card_extend)
     await state.update_data(extend_email=email)
+    limit = get_traffic_gb()
     await cb.message.answer(
         f"📅 На сколько <b>месяцев</b> продлить? Пришли число (1–60).\n"
-        f"За каждый месяц: +{config.plan_days} дн. срока и +{config.plan_traffic_gb} ГБ к лимиту "
-        f"(счётчик НЕ сбрасывается). Отмена — кнопка снизу."
+        f"Срок: +N×{config.plan_days} дн. Лимит станет <b>N×{limit} ГБ</b>, "
+        f"счётчик трафика сбросится. Отмена — кнопка снизу."
     )
     await cb.answer()
 
@@ -360,15 +363,17 @@ async def card_extend_input(message: Message, state: FSMContext) -> None:
         await message.answer("Нужно целое число месяцев 1–60. Отменено.")
         return
     months = int(raw)
+    limit = get_traffic_gb()
     xui = get_xui()
     cl = await xui.find_by_email(email)
     if not cl:
         await message.answer("Клиент не найден (удалён?).")
         return
     try:
+        # N мес: лимит = N×месячный (порог растёт при N>1), счётчик сбрасывается.
         res = await xui.extend_client(
             client=cl, add_days=months * config.plan_days,
-            add_total_gb=months * config.plan_traffic_gb, reset_traffic=False,
+            set_total_gb=months * limit, reset_traffic=True,
             inbound_ids=config.default_inbound_ids)
     except Exception:  # noqa: BLE001
         log.exception("manual extend failed")
@@ -379,8 +384,53 @@ async def card_extend_input(message: Message, state: FSMContext) -> None:
     if tgid > 0:
         await _safe_user_msg(tgid, texts.renewed(days if days is not None else months * config.plan_days))
     await message.answer(
-        f"✅ Продлено на {months} мес. (~{days} дн. всего, +{months * config.plan_traffic_gb} ГБ к лимиту)."
+        f"✅ Продлено на {months} мес. (~{days} дн. всего, лимит = {months * limit} ГБ, трафик сброшен)."
     )
+
+
+@router.callback_query(F.data.startswith("cli:sub:"))
+async def cb_cli_sub(cb: CallbackQuery, state: FSMContext) -> None:
+    email = cb.data.split(":", 2)[2]
+    cl = await get_xui().find_by_email(email)
+    if not cl:
+        await cb.answer("Клиент не найден", show_alert=True)
+        return
+    await state.set_state(AdminFSM.card_subtract)
+    await state.update_data(sub_email=email)
+    await cb.message.answer(
+        f"➖ На сколько <b>месяцев</b> УБАВИТЬ срок? Пришли число (1–60).\n"
+        f"Это коррекция даты окончания (если переборщил). Лимит и трафик не трогаю. "
+        f"Отмена — кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.card_subtract, F.text)
+async def card_subtract_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    email = data.get("sub_email")
+    raw = (message.text or "").strip()
+    if not (raw.isdigit() and 1 <= int(raw) <= 60):
+        await message.answer("Нужно целое число месяцев 1–60. Отменено.")
+        return
+    months = int(raw)
+    xui = get_xui()
+    cl = await xui.find_by_email(email)
+    if not cl:
+        await message.answer("Клиент не найден (удалён?).")
+        return
+    try:
+        # Убавляем срок: add_days отрицательный, лимит/счётчик не трогаем.
+        res = await xui.extend_client(
+            client=cl, add_days=-months * config.plan_days, reset_traffic=False,
+            inbound_ids=config.default_inbound_ids)
+    except Exception:  # noqa: BLE001
+        log.exception("manual subtract failed")
+        await message.answer("❌ Ошибка панели — изменить срок не удалось. См. логи.")
+        return
+    days = xui.days_left({"expiryTime": res["expiry_ms"]})
+    await message.answer(f"✅ Срок уменьшен на {months} мес. Осталось ~{days} дн.")
 
 
 @router.callback_query(F.data.startswith("cli:tog:"))
@@ -572,7 +622,7 @@ async def _do_grant(tg_id: int) -> str:
         if existing:
             await xui.extend_client(
                 client=existing, add_days=config.plan_days,
-                set_total_gb=config.plan_traffic_gb, reset_traffic=True,  # свежий месяц
+                set_total_gb=get_traffic_gb(), reset_traffic=True,  # свежий месяц
                 inbound_ids=config.default_inbound_ids)
             db.upsert_user(tg_id, uname, client_email=existing.get("email"),
                            sub_id=existing.get("subId"))
@@ -581,7 +631,7 @@ async def _do_grant(tg_id: int) -> str:
         email = _client_email(tg_id)
         created = await xui.create_client(
             tg_id=tg_id, email=email, days=config.plan_days,
-            traffic_gb=config.plan_traffic_gb, inbound_ids=config.default_inbound_ids,
+            traffic_gb=get_traffic_gb(), inbound_ids=config.default_inbound_ids,
         )
         db.upsert_user(tg_id, uname, client_email=email, sub_id=created["sub_id"])
         await _safe_user_msg(tg_id, texts.new_subscription_issued(
@@ -600,6 +650,7 @@ def _settings_text_markup():
     price = db.get_setting("price", config.default_price)
     req = db.get_setting("requisites", config.default_requisites) or "(не заданы)"
     text = (f"💳 Цена: <b>{html.escape(price)} ₽</b> за {config.plan_days} дн.\n"
+            f"📦 Лимит трафика: <b>{get_traffic_gb()} ГБ</b>/мес\n"
             f"🏦 Реквизиты:\n<code>{html.escape(req)}</code>")
     backup_btn = None
     if config.backup_enabled:
@@ -664,6 +715,28 @@ async def set_req_input(message: Message, state: FSMContext) -> None:
     await state.clear()
     db.set_setting("requisites", (message.text or "").strip())
     await message.answer("✅ Реквизиты обновлены.")
+
+
+@router.callback_query(F.data == "set:traffic")
+async def cb_set_traffic(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminFSM.set_traffic)
+    await cb.message.answer(
+        f"Введите месячный лимит трафика в <b>ГБ</b> (число, сейчас {get_traffic_gb()}).\n"
+        f"Применится к новым выдачам и продлениям. Уже активные клиенты получат "
+        f"новый лимит при следующем продлении."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.set_traffic, F.text)
+async def set_traffic_input(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    raw = (message.text or "").strip()
+    if not (raw.isdigit() and 1 <= int(raw) <= 100000):
+        await message.answer("Нужно целое число ГБ (1–100000). Отменено.")
+        return
+    db.set_setting("traffic_gb", str(int(raw)))
+    await message.answer(f"✅ Месячный лимит трафика обновлён: <b>{int(raw)} ГБ</b>.")
 
 
 # =====================================================================
