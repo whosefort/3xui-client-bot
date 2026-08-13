@@ -22,8 +22,9 @@ from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
                          confirm_delete_kb, settings_kb)
-from ..runtime import get_bot, get_xui
-from .common import get_traffic_gb, sub_link
+from ..panels.base import Client
+from ..runtime import get_bot, get_panel
+from .common import get_traffic_gb
 
 log = logging.getLogger("admin")
 router = Router()
@@ -47,20 +48,15 @@ class AdminFSM(StatesGroup):
     set_traffic = State()        # ждём новый месячный лимит трафика (ГБ)
 
 
-def _client_email(tg_id: int) -> str:
-    return f"u{tg_id}"
-
-
 # ---------- форматирование ----------
 
-def _label(cl: dict, umap: dict[int, str]) -> str:
-    """Человекочитаемое имя клиента: @username → id → email."""
-    tgid = int(cl.get("tgId") or 0)
-    if tgid and umap.get(tgid):
-        return umap[tgid]
-    if tgid:
-        return f"id {tgid}"
-    return cl.get("email") or "—"
+def _label(cl: Client, umap: dict[int, str]) -> str:
+    """Человекочитаемое имя клиента: @username → id → username."""
+    if cl.tg_id and umap.get(cl.tg_id):
+        return umap[cl.tg_id]
+    if cl.tg_id:
+        return f"id {cl.tg_id}"
+    return cl.username or "—"
 
 
 def _fmt_bytes(b: float) -> str:
@@ -71,11 +67,9 @@ def _fmt_bytes(b: float) -> str:
     return f"{b:.1f} ПБ"
 
 
-def _usage(cl: dict) -> str:
+def _usage(cl: Client) -> str:
     """Использованный трафик / лимит (админу показывать можно)."""
-    t = cl.get("traffic") if isinstance(cl.get("traffic"), dict) else cl
-    used = int(t.get("up") or 0) + int(t.get("down") or 0)
-    total = int(cl.get("totalGB") or 0)
+    used, total = cl.used_bytes, cl.limit_bytes
     if used == 0 and total == 0:
         return ""
     if total > 0:
@@ -83,22 +77,21 @@ def _usage(cl: dict) -> str:
     return _fmt_bytes(used)
 
 
-def _card_text(cl: dict, umap: dict[int, str]) -> str:
-    xui = get_xui()
-    days = xui.days_left(cl)
-    enabled = cl.get("enable", True)
+def _card_text(cl: Client, umap: dict[int, str]) -> str:
+    days = cl.days_left
     if days is None:
         status = "♾ бессрочно"
-    elif days <= 0 or not enabled:
+    elif days <= 0 or not cl.enabled:
         status = "⛔️ истекла / выключена"
+    elif cl.exhausted:
+        status = "⚠️ лимит трафика исчерпан"
     else:
         status = f"✅ активна, осталось <b>{days}</b> дн."
 
     lines = [f"👤 <b>{html.escape(_label(cl, umap))}</b>"]
-    tgid = int(cl.get("tgId") or 0)
-    if tgid:
-        lines.append(f"tg_id: <code>{tgid}</code>")
-    lines.append(f"email: <code>{html.escape(cl.get('email', ''))}</code>")
+    if cl.tg_id:
+        lines.append(f"tg_id: <code>{cl.tg_id}</code>")
+    lines.append(f"логин: <code>{html.escape(cl.username)}</code>")
     lines.append(f"Статус: {status}")
     usage = _usage(cl)
     if usage:
@@ -198,34 +191,29 @@ async def cb_decision(cb: CallbackQuery) -> None:
 
 
 async def _approve_new(req) -> None:
-    xui = get_xui()
+    panel = get_panel()
     tg_id = req["tg_id"]
-    email = _client_email(tg_id)
-    created = await xui.create_client(
-        tg_id=tg_id, email=email, days=config.plan_days,
-        traffic_gb=get_traffic_gb(), inbound_ids=config.default_inbound_ids,
-    )
-    db.upsert_user(tg_id, req["tg_username"], client_email=email, sub_id=created["sub_id"])
-    await _safe_user_msg(tg_id, texts.new_subscription_issued(
-        config.plan_days, sub_link(created["sub_id"])))
+    created = await panel.create_client(
+        tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
+    db.upsert_user(tg_id, req["tg_username"], client_email=created.username, sub_id=created.sub_url)
+    await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.sub_url))
 
 
 async def _approve_renew(req) -> None:
-    xui = get_xui()
+    panel = get_panel()
     tg_id = req["tg_id"]
-    client = await xui.find_by_tgid(tg_id)
+    client = await panel.find_by_tgid(tg_id)
     if not client:
-        # Заявка на продление, но клиента в панели нет (старый клиент без tgId,
-        # удалённый, или поддельный paid:renew). Не падаем в RuntimeError, из-за
-        # которого заявка вечно висела pending — просто выдаём новую подписку.
+        # Заявка на продление, но клиента в панели нет (старый/удалённый/поддельный
+        # renew). Не падаем в ошибку (из-за которой заявка вечно висела pending) —
+        # просто выдаём новую подписку.
         log.info("renew без клиента tg_id=%s → выдаём новую подписку", tg_id)
         await _approve_new(req)
         return
-    res = await xui.extend_client(
+    res = await panel.extend_client(
         client=client, add_days=config.plan_days,
-        set_total_gb=get_traffic_gb(), reset_traffic=True,  # свежий месяц: 150 ГБ заново
-        inbound_ids=config.default_inbound_ids)
-    days = xui.days_left({"expiryTime": res["expiry_ms"]})
+        set_total_gb=get_traffic_gb(), reset_traffic=True)   # свежий месяц
+    days = res.days_left
     await _safe_user_msg(tg_id, texts.renewed(days if days is not None else config.plan_days))
 
 
@@ -236,11 +224,11 @@ async def _approve_renew(req) -> None:
 @router.message(F.text == kb.ADM_EXPIRING)
 async def kb_expiring(message: Message, state: FSMContext) -> None:
     await state.clear()
-    xui = get_xui()
+    panel = get_panel()
     umap = db.usernames_map()
     rows = []
-    for cl in await xui.list_clients():
-        days = xui.days_left(cl)
+    for cl in await panel.list_clients():
+        days = cl.days_left
         if days is not None and days <= 7:
             rows.append((days, f"• {html.escape(_label(cl, umap))} — <b>{days}</b> дн."))
     if not rows:
@@ -255,22 +243,22 @@ async def kb_expiring(message: Message, state: FSMContext) -> None:
 # =====================================================================
 
 async def _list_text_markup():
-    xui = get_xui()
+    panel = get_panel()
     umap = db.usernames_map()
-    clients = await xui.list_clients()
+    clients = await panel.list_clients()
 
     def sort_key(cl):
-        d = xui.days_left(cl)
+        d = cl.days_left
         return (10**9 if d is None else d, _label(cl, umap).lower())
 
     clients.sort(key=sort_key)
     items = []
     for cl in clients:
-        days = xui.days_left(cl)
+        days = cl.days_left
         d = "♾" if days is None else f"{days}д"
-        off = "" if (days is None or days > 0) and cl.get("enable", True) else "⛔️"
+        off = "" if (days is None or days > 0) and cl.enabled else "⛔️"
         label = f"{off}{_label(cl, umap)} · {d}".strip()
-        items.append((cl.get("email", ""), label))
+        items.append((cl.username, label))
 
     text = f"👥 <b>Клиенты ({len(items)})</b>\nНажмите на клиента для управления:"
     return text, clients_list_kb(items)
@@ -297,15 +285,14 @@ async def cb_cli_close(cb: CallbackQuery) -> None:
 
 
 async def _show_card(cb: CallbackQuery, email: str) -> None:
-    xui = get_xui()
-    cl = await xui.find_by_email(email)
+    cl = await get_panel().find_by_username(email)
     if not cl:
         await cb.answer("Клиент не найден (возможно, удалён)", show_alert=True)
         return
     umap = db.usernames_map()
     await cb.message.edit_text(
         _card_text(cl, umap),
-        reply_markup=client_card_kb(email, cl.get("enable", True)),
+        reply_markup=client_card_kb(email, cl.enabled),
     )
 
 
@@ -319,18 +306,16 @@ async def cb_cli_open(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("cli:ext:"))
 async def cb_cli_ext(cb: CallbackQuery) -> None:
     email = cb.data.split(":", 2)[2]
-    xui = get_xui()
-    cl = await xui.find_by_email(email)
+    panel = get_panel()
+    cl = await panel.find_by_username(email)
     if not cl:
         await cb.answer("Клиент не найден", show_alert=True)
         return
-    await xui.extend_client(
+    await panel.extend_client(
         client=cl, add_days=config.plan_days,
-        set_total_gb=get_traffic_gb(), reset_traffic=True,  # свежий месяц: 150 ГБ заново
-        inbound_ids=config.default_inbound_ids)
-    tgid = int(cl.get("tgId") or 0)
-    if tgid:
-        await _safe_user_msg(tgid, texts.renewed(config.plan_days))
+        set_total_gb=get_traffic_gb(), reset_traffic=True)   # свежий месяц
+    if cl.tg_id:
+        await _safe_user_msg(cl.tg_id, texts.renewed(config.plan_days))
     await _show_card(cb, email)
     await cb.answer(f"Продлено на {config.plan_days} дн. (трафик сброшен)")
 
@@ -338,7 +323,7 @@ async def cb_cli_ext(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("cli:extn:"))
 async def cb_cli_extn(cb: CallbackQuery, state: FSMContext) -> None:
     email = cb.data.split(":", 2)[2]
-    cl = await get_xui().find_by_email(email)
+    cl = await get_panel().find_by_username(email)
     if not cl:
         await cb.answer("Клиент не найден", show_alert=True)
         return
@@ -364,25 +349,23 @@ async def card_extend_input(message: Message, state: FSMContext) -> None:
         return
     months = int(raw)
     limit = get_traffic_gb()
-    xui = get_xui()
-    cl = await xui.find_by_email(email)
+    panel = get_panel()
+    cl = await panel.find_by_username(email)
     if not cl:
         await message.answer("Клиент не найден (удалён?).")
         return
     try:
         # N мес: лимит = N×месячный (порог растёт при N>1), счётчик сбрасывается.
-        res = await xui.extend_client(
+        res = await panel.extend_client(
             client=cl, add_days=months * config.plan_days,
-            set_total_gb=months * limit, reset_traffic=True,
-            inbound_ids=config.default_inbound_ids)
+            set_total_gb=months * limit, reset_traffic=True)
     except Exception:  # noqa: BLE001
         log.exception("manual extend failed")
         await message.answer("❌ Ошибка панели — продлить не удалось. См. логи.")
         return
-    days = xui.days_left({"expiryTime": res["expiry_ms"]})
-    tgid = int(cl.get("tgId") or 0)
-    if tgid > 0:
-        await _safe_user_msg(tgid, texts.renewed(days if days is not None else months * config.plan_days))
+    days = res.days_left
+    if cl.tg_id > 0:
+        await _safe_user_msg(cl.tg_id, texts.renewed(days if days is not None else months * config.plan_days))
     await message.answer(
         f"✅ Продлено на {months} мес. (~{days} дн. всего, лимит = {months * limit} ГБ, трафик сброшен)."
     )
@@ -391,7 +374,7 @@ async def card_extend_input(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("cli:sub:"))
 async def cb_cli_sub(cb: CallbackQuery, state: FSMContext) -> None:
     email = cb.data.split(":", 2)[2]
-    cl = await get_xui().find_by_email(email)
+    cl = await get_panel().find_by_username(email)
     if not cl:
         await cb.answer("Клиент не найден", show_alert=True)
         return
@@ -415,37 +398,35 @@ async def card_subtract_input(message: Message, state: FSMContext) -> None:
         await message.answer("Нужно целое число месяцев 1–60. Отменено.")
         return
     months = int(raw)
-    xui = get_xui()
-    cl = await xui.find_by_email(email)
+    panel = get_panel()
+    cl = await panel.find_by_username(email)
     if not cl:
         await message.answer("Клиент не найден (удалён?).")
         return
     try:
         # Убавляем срок: add_days отрицательный, лимит/счётчик не трогаем.
-        res = await xui.extend_client(
-            client=cl, add_days=-months * config.plan_days, reset_traffic=False,
-            inbound_ids=config.default_inbound_ids)
+        res = await panel.extend_client(
+            client=cl, add_days=-months * config.plan_days, reset_traffic=False)
     except Exception:  # noqa: BLE001
         log.exception("manual subtract failed")
         await message.answer("❌ Ошибка панели — изменить срок не удалось. См. логи.")
         return
-    days = xui.days_left({"expiryTime": res["expiry_ms"]})
+    days = res.days_left
     await message.answer(f"✅ Срок уменьшен на {months} мес. Осталось ~{days} дн.")
 
 
 @router.callback_query(F.data.startswith("cli:tog:"))
 async def cb_cli_tog(cb: CallbackQuery) -> None:
     email = cb.data.split(":", 2)[2]
-    xui = get_xui()
-    cl = await xui.find_by_email(email)
+    panel = get_panel()
+    cl = await panel.find_by_username(email)
     if not cl:
         await cb.answer("Клиент не найден", show_alert=True)
         return
-    new_state = not cl.get("enable", True)
-    await xui.set_enabled(client=cl, enabled=new_state)
-    tgid = int(cl.get("tgId") or 0)
-    if tgid > 0:
-        await _safe_user_msg(tgid, (
+    new_state = not cl.enabled
+    await panel.set_enabled(client=cl, enabled=new_state)
+    if cl.tg_id > 0:
+        await _safe_user_msg(cl.tg_id, (
             "✅ Доступ к VPN возобновлён." if new_state
             else "⏸ Доступ к VPN приостановлен. По вопросам — кнопка «Связаться»."
         ))
@@ -456,14 +437,13 @@ async def cb_cli_tog(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("cli:lnk:"))
 async def cb_cli_lnk(cb: CallbackQuery) -> None:
     email = cb.data.split(":", 2)[2]
-    xui = get_xui()
-    cl = await xui.find_by_email(email)
+    cl = await get_panel().find_by_username(email)
     if not cl:
         await cb.answer("Клиент не найден", show_alert=True)
         return
     await cb.message.answer(
         f"🔗 Ссылка-подписка <b>{html.escape(_label(cl, db.usernames_map()))}</b>:\n"
-        f"<code>{sub_link(cl.get('subId') or '')}</code>"
+        f"<code>{cl.sub_url}</code>"
     )
     await cb.answer()
 
@@ -471,13 +451,13 @@ async def cb_cli_lnk(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("cli:msg:"))
 async def cb_cli_msg(cb: CallbackQuery, state: FSMContext) -> None:
     email = cb.data.split(":", 2)[2]
-    cl = await get_xui().find_by_email(email)
+    cl = await get_panel().find_by_username(email)
     if not cl:
         await cb.answer("Клиент не найден", show_alert=True)
         return
-    tgid = int(cl.get("tgId") or 0)
+    tgid = cl.tg_id
     if tgid <= 0:
-        await cb.answer("У клиента не задан tgId — писать некому", show_alert=True)
+        await cb.answer("У клиента не задан tg_id — писать некому", show_alert=True)
         return
     await state.set_state(AdminFSM.card_msg)
     await state.update_data(msg_tgid=tgid)
@@ -508,7 +488,7 @@ async def card_msg_input(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("cli:bind:"))
 async def cb_cli_bind(cb: CallbackQuery, state: FSMContext) -> None:
     email = cb.data.split(":", 2)[2]
-    cl = await get_xui().find_by_email(email)
+    cl = await get_panel().find_by_username(email)
     if not cl:
         await cb.answer("Клиент не найден", show_alert=True)
         return
@@ -530,20 +510,20 @@ async def card_bind_input(message: Message, state: FSMContext) -> None:
     if tg_id is None:
         await message.answer("Нужен положительный числовой tg_id. Отменено.")
         return
-    xui = get_xui()
-    cl = await xui.find_by_email(email)
+    panel = get_panel()
+    cl = await panel.find_by_username(email)
     if not cl:
         await message.answer("Клиент не найден (удалён?).")
         return
     try:
-        await xui.bind_tgid(client=cl, tg_id=tg_id)
+        await panel.bind_tgid(client=cl, tg_id=tg_id)
     except Exception:  # noqa: BLE001
         log.exception("manual bind failed")
         await message.answer("❌ Ошибка панели — привязать не удалось. См. логи.")
         return
     user = db.get_user(tg_id)
     db.upsert_user(tg_id, user["tg_username"] if user else None,
-                   client_email=cl.get("email"), sub_id=cl.get("subId"))
+                   client_email=cl.username, sub_id=cl.sub_url)
     await message.answer(f"✅ Привязан tg_id <code>{tg_id}</code> к <code>{html.escape(email)}</code>.")
     await _safe_user_msg(tg_id, "🔗 Администратор привязал вашу подписку к этому чату. "
                                 "Нажмите /start и «📊 Моя подписка».")
@@ -563,12 +543,12 @@ async def cb_cli_del(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("cli:delok:"))
 async def cb_cli_delok(cb: CallbackQuery) -> None:
     email = cb.data.split(":", 2)[2]
-    xui = get_xui()
-    # Узнаём tgId ДО удаления, чтобы потом уведомить пользователя.
-    cl = await xui.find_by_email(email)
-    tgid = int(cl.get("tgId") or 0) if cl else 0
+    panel = get_panel()
+    # Узнаём tg_id ДО удаления, чтобы потом уведомить пользователя.
+    cl = await panel.find_by_username(email)
+    tgid = cl.tg_id if cl else 0
     try:
-        await xui.delete_client(email)
+        await panel.delete_client(email)
     except Exception:  # noqa: BLE001
         log.exception("Ошибка удаления клиента %s", email)
         await cb.answer("Не удалось удалить (панель недоступна?). См. логи.", show_alert=True)
@@ -614,28 +594,24 @@ async def grant_input(message: Message, state: FSMContext) -> None:
 
 
 async def _do_grant(tg_id: int) -> str:
-    xui = get_xui()
+    panel = get_panel()
     user = db.get_user(tg_id)
     uname = user["tg_username"] if user else None
     try:
-        existing = await xui.find_by_tgid(tg_id)
+        existing = await panel.find_by_tgid(tg_id)
         if existing:
-            await xui.extend_client(
+            await panel.extend_client(
                 client=existing, add_days=config.plan_days,
-                set_total_gb=get_traffic_gb(), reset_traffic=True,  # свежий месяц
-                inbound_ids=config.default_inbound_ids)
-            db.upsert_user(tg_id, uname, client_email=existing.get("email"),
-                           sub_id=existing.get("subId"))
+                set_total_gb=get_traffic_gb(), reset_traffic=True)   # свежий месяц
+            db.upsert_user(tg_id, uname, client_email=existing.username,
+                           sub_id=existing.sub_url)
             await _safe_user_msg(tg_id, texts.renewed(config.plan_days))
             return f"✅ Продлено на {config.plan_days} дн. для {tg_id}"
-        email = _client_email(tg_id)
-        created = await xui.create_client(
-            tg_id=tg_id, email=email, days=config.plan_days,
-            traffic_gb=get_traffic_gb(), inbound_ids=config.default_inbound_ids,
-        )
-        db.upsert_user(tg_id, uname, client_email=email, sub_id=created["sub_id"])
+        created = await panel.create_client(
+            tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
+        db.upsert_user(tg_id, uname, client_email=created.username, sub_id=created.sub_url)
         await _safe_user_msg(tg_id, texts.new_subscription_issued(
-            config.plan_days, sub_link(created["sub_id"])))
+            config.plan_days, created.sub_url))
         return f"✅ Создана подписка для {tg_id}"
     except Exception:  # noqa: BLE001
         log.exception("grant failed")

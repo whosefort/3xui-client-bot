@@ -1,12 +1,24 @@
 """Конфигурация из переменных окружения (.env)."""
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _json(key: str, default=None):
+    raw = os.getenv(key, "")
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return default
 
 
 def _int_list(raw: str) -> list[int]:
@@ -45,6 +57,18 @@ class Config:
     bot_token: str = os.getenv("BOT_TOKEN", "")
     admin_ids: list[int] = field(default_factory=lambda: _ids(os.getenv("ADMIN_IDS", "")))
     support_chat_id: int = _safe_int(os.getenv("SUPPORT_CHAT_ID", "0"))
+
+    # Выбор бэкенда панели: xui | marzban
+    panel_backend: str = os.getenv("PANEL_BACKEND", "xui").strip().lower()
+
+    # Marzban
+    marzban_url: str = os.getenv("MARZBAN_URL", "").rstrip("/")
+    marzban_username: str = os.getenv("MARZBAN_USERNAME", "")
+    marzban_password: str = os.getenv("MARZBAN_PASSWORD", "")
+    marzban_reset_strategy: str = os.getenv("MARZBAN_RESET_STRATEGY", "month")
+    # Опционально: чем создавать юзера. Пусто → берём ВСЕ инбаунды панели.
+    marzban_proxies: Optional[dict] = field(default_factory=lambda: _json("MARZBAN_PROXIES", None))
+    marzban_inbounds: Optional[dict] = field(default_factory=lambda: _json("MARZBAN_INBOUNDS", None))
 
     # 3X-UI
     xui_base_url: str = os.getenv("XUI_BASE_URL", "").rstrip("/")
@@ -91,12 +115,20 @@ class Config:
             missing.append("BOT_TOKEN")
         if not self.admin_ids:
             missing.append("ADMIN_IDS")
-        if not self.xui_base_url:
-            missing.append("XUI_BASE_URL")
-        if self.xui_auth == "token" and not self.xui_api_token:
-            missing.append("XUI_API_TOKEN")
-        if self.xui_auth == "login" and not (self.xui_username and self.xui_password):
-            missing.append("XUI_USERNAME/XUI_PASSWORD")
+        if self.panel_backend == "marzban":
+            if not self.marzban_url:
+                missing.append("MARZBAN_URL")
+            if not self.marzban_username:
+                missing.append("MARZBAN_USERNAME")
+            if not self.marzban_password:
+                missing.append("MARZBAN_PASSWORD")
+        else:
+            if not self.xui_base_url:
+                missing.append("XUI_BASE_URL")
+            if self.xui_auth == "token" and not self.xui_api_token:
+                missing.append("XUI_API_TOKEN")
+            if self.xui_auth == "login" and not (self.xui_username and self.xui_password):
+                missing.append("XUI_USERNAME/XUI_PASSWORD")
         if missing:
             raise RuntimeError(f"Не заданы обязательные переменные .env: {', '.join(missing)}")
 

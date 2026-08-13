@@ -13,8 +13,8 @@ from aiogram.types import CallbackQuery, Message
 from .. import db, texts
 from ..config import config
 from ..keyboards import back_to_menu, confirm_paid, main_menu
-from ..runtime import get_xui
-from .common import get_price, get_requisites, notify_admins, resolve_client, sub_link
+from ..runtime import get_panel
+from .common import get_price, get_requisites, notify_admins, resolve_client
 
 log = logging.getLogger("user")
 router = Router()
@@ -67,26 +67,23 @@ async def cb_menu(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "status")
 async def cb_status(cb: CallbackQuery) -> None:
-    xui = get_xui()
-    traffics = await resolve_client(cb.from_user.id)
-    if not traffics:
+    cl = await resolve_client(cb.from_user.id)
+    if not cl:
         await cb.message.edit_text(texts.status_none(), reply_markup=main_menu(False))
         await cb.answer()
         return
 
-    sub_url = sub_link(traffics.get("subId") or "")
-    days = xui.days_left(traffics)
-    enabled = traffics.get("enable", True)
-    if not enabled or (days is not None and days <= 0):
+    days = cl.days_left
+    if not cl.enabled or (days is not None and days <= 0):
         text = texts.status_expired()
-    elif xui.is_exhausted(traffics):
+    elif cl.exhausted:
         # Срок ещё идёт, но трафик кончился — иначе юзер видел бы «активна»,
         # а VPN не работает (ровно та путаница, ради которой делался бот).
         text = texts.status_exhausted()
     elif days is None:
-        text = texts.status_unlimited(sub_url)
+        text = texts.status_unlimited(cl.sub_url)
     else:
-        text = texts.status_active(days, sub_url)
+        text = texts.status_active(days, cl.sub_url)
     await cb.message.edit_text(text, reply_markup=main_menu(True))
     await cb.answer()
 
@@ -136,33 +133,31 @@ async def cb_have_sub(cb: CallbackQuery, state: FSMContext) -> None:
 @router.message(Bind.waiting, F.text)
 async def bind_input(message: Message, state: FSMContext) -> None:
     await state.clear()
-    xui = get_xui()
+    panel = get_panel()
     me = message.from_user.id
     sub_id = _extract_subid(message.text)
     if not sub_id:
         await message.answer(texts.bind_bad_input(), reply_markup=back_to_menu())
         return
-    client = await xui.find_by_subid(sub_id)
+    client = await panel.find_by_subid(sub_id)
     if not client:
         await message.answer(texts.bind_not_found(), reply_markup=back_to_menu())
         return
-    tgid = int(client.get("tgId") or 0)
-    if tgid and tgid != me:
+    if client.tg_id and client.tg_id != me:
         # подписка уже принадлежит другому Telegram — не даём перехватить
         await message.answer(texts.bind_taken(), reply_markup=back_to_menu())
         await notify_admins(
             f"⚠️ {html.escape(_uname(message) or str(me))} (id <code>{me}</code>) "
-            f"пытался привязать чужую подписку <code>{html.escape(client.get('email') or '')}</code> "
-            f"(уже за tgId <code>{tgid}</code>)."
+            f"пытался привязать чужую подписку <code>{html.escape(client.username)}</code> "
+            f"(уже за tgId <code>{client.tg_id}</code>)."
         )
         return
-    await xui.bind_tgid(client=client, tg_id=me)
-    db.upsert_user(me, _uname(message),
-                   client_email=client.get("email"), sub_id=client.get("subId"))
+    await panel.bind_tgid(client=client, tg_id=me)
+    db.upsert_user(me, _uname(message), client_email=client.username, sub_id=client.sub_url)
     await message.answer(texts.bind_ok(), reply_markup=main_menu(True))
     await notify_admins(
         f"🔗 {html.escape(_uname(message) or str(me))} (id <code>{me}</code>) "
-        f"привязал подписку <code>{html.escape(client.get('email') or '')}</code>."
+        f"привязал подписку <code>{html.escape(client.username)}</code>."
     )
 
 

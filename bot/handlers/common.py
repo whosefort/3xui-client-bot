@@ -6,7 +6,8 @@ from typing import Optional
 
 from .. import db
 from ..config import config
-from ..runtime import get_bot, get_xui
+from ..panels.base import Client
+from ..runtime import get_bot, get_panel
 
 log = logging.getLogger("handlers")
 
@@ -29,29 +30,24 @@ def get_traffic_gb() -> int:
         return config.plan_traffic_gb
 
 
-def sub_link(sub_id: str) -> str:
-    return get_xui().sub_url(sub_id, template=config.sub_url_template)
+async def resolve_client(tg_id: int) -> Optional[Client]:
+    """Вернуть нормализованного Client из панели или None.
 
-
-async def resolve_client(tg_id: int) -> Optional[dict]:
-    """Вернуть объект клиента из панели (expiryTime, enable, subId, …) или None.
-
-    Источник правды — Clients API панели. Email/subId кэшируем в БД, чтобы при
-    наличии кэша искать по email, иначе — по tgId. Сам объект содержит всё нужное.
+    Источник правды — панель. username кэшируем в БД (client_email): при наличии
+    кэша ищем по username, иначе по tgId.
     """
-    xui = get_xui()
+    panel = get_panel()
     user = db.get_user(tg_id)
-    email = user["client_email"] if user else None
+    username = user["client_email"] if user else None
 
-    client = (await xui.find_by_email(email)) if email else None
+    client = (await panel.find_by_username(username)) if username else None
     if client is None:
-        client = await xui.find_by_tgid(tg_id)
+        client = await panel.find_by_tgid(tg_id)
     if client is None:
         return None
 
-    # синхронизируем кэш идентичности
     db.upsert_user(tg_id, user["tg_username"] if user else None,
-                   client_email=client.get("email"), sub_id=client.get("subId"))
+                   client_email=client.username, sub_id=client.sub_url)
     return client
 
 

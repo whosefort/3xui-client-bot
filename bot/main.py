@@ -12,8 +12,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from . import db, runtime
 from .config import config
 from .handlers import setup_routers
+from .panels import build_panel
 from .scheduler import setup_scheduler
-from .xui import XUIClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,16 +26,8 @@ async def main() -> None:
     config.validate()
     db.init(config.db_path)
 
-    runtime.xui = XUIClient(
-        config.xui_base_url,
-        auth=config.xui_auth,
-        api_token=config.xui_api_token,
-        username=config.xui_username,
-        password=config.xui_password,
-        twofa_secret=config.xui_2fa_secret,
-        client_flow=config.client_flow,
-        verify_ssl=True,
-    )
+    runtime.panel = build_panel()
+    log.info("Бэкенд панели: %s", config.panel_backend)
 
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     runtime.bot = bot
@@ -52,7 +44,7 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         sched.shutdown(wait=False)
-        await runtime.xui.close()
+        await runtime.panel.close()
         await bot.session.close()
 
 

@@ -5,15 +5,15 @@ from typing import Optional
 
 from aiogram import Bot
 
-from .xui import XUIClient
+from .panels.base import PanelClient
 
-xui: Optional[XUIClient] = None
+panel: Optional[PanelClient] = None
 bot: Optional[Bot] = None
 
 
-def get_xui() -> XUIClient:
-    assert xui is not None, "XUI клиент не инициализирован"
-    return xui
+def get_panel() -> PanelClient:
+    assert panel is not None, "Панель не инициализирована"
+    return panel
 
 
 def get_bot() -> Bot:

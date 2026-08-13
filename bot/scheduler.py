@@ -13,41 +13,41 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from . import db, texts
 from .config import config
-from .runtime import get_bot, get_xui
+from .runtime import get_bot, get_panel
 
 log = logging.getLogger("scheduler")
 
 
 async def reminders_sweep() -> None:
-    xui = get_xui()
+    panel = get_panel()
     bot = get_bot()
     buckets = sorted(config.remind_days_before, reverse=True)  # напр. [3,1,0]
     checked = sent = 0
 
     try:
-        by_email = {c.get("email"): c for c in await xui.list_clients()}
+        by_name = {c.username: c for c in await panel.list_clients()}
     except Exception as e:  # noqa: BLE001
         log.error("Обход напоминаний прерван — панель недоступна: %s", e)
         return
 
     for user in db.all_linked_users():
         # Весь разбор одного клиента — под try. Один битый клиент (мусорный
-        # expiryTime → OverflowError в fromtimestamp и т.п.) НЕ должен обрывать
+        # срок → OverflowError в fromtimestamp и т.п.) НЕ должен обрывать
         # обход: иначе все следующие юзеры молча не получат напоминание.
         try:
             tg_id = user["tg_id"]
-            client = by_email.get(user["client_email"])
+            client = by_name.get(user["client_email"])
             if not client:
                 continue
             checked += 1
 
-            days = xui.days_left(client)
+            days = client.days_left
             if days is None:  # бессрочно
                 continue
-            exp_ms = int(client.get("expiryTime") or 0)
-            if exp_ms <= 0:
+            exp_ts = int(client.expire_ts or 0)
+            if exp_ts <= 0:
                 continue
-            expiry_date = dt.datetime.fromtimestamp(exp_ms / 1000).strftime("%Y-%m-%d")
+            expiry_date = dt.datetime.fromtimestamp(exp_ts).strftime("%Y-%m-%d")
 
             eligible = [b for b in buckets
                         if days <= b and not db.already_reminded(tg_id, expiry_date, b)]
