@@ -11,9 +11,8 @@
 #      её адрес сам попадёт в Hosts инбаундов, ссылки клиентов поедут на ноду.
 #
 # Запуск:
-#   PANEL_URL=https://mon.your-domain.tld PANEL_USER=admin PANEL_PASS=... \
-#     bash bootstrap.sh
-#   (креды можно не задавать в env — скрипт спросит; пароль без эха)
+#   PANEL_URL=https://mon.your-domain.tld bash bootstrap.sh
+#   (логин и пароль скрипт спросит; пароль без эха)
 #
 # ⚠️ REALITY-инбаунд описывается в САМОЙ панели (Core/Hosts) — отдельно, разово.
 #    Нода служит то, что панель ей раскатает.
@@ -34,6 +33,10 @@ PANEL_PASS="${PANEL_PASS:-}"
 NODE_NAME="${NODE_NAME:-$(hostname)}"
 SERVICE_PORT="${SERVICE_PORT:-62050}"
 XRAY_API_PORT="${XRAY_API_PORT:-62051}"
+# Реальный IP панели. Обычно определяется автоматически, но если панель за CDN
+# (Cloudflare и т.п.) — DNS вернёт IP CDN, а входящие соединения панель→нода
+# придут с реального origin-IP. Тогда его обязательно надо задать вручную.
+PANEL_IP="${PANEL_IP:-}"
 # Порты инбаундов, открыть всем (REALITY обычно 443). Через пробел.
 INBOUND_PORTS="${INBOUND_PORTS:-443}"
 
@@ -48,12 +51,88 @@ PUBIP="$(curl -fsSL https://api.ipify.org 2>/dev/null || true)"
 [ -n "$PUBIP" ] || die "Не смог определить публичный IP — задай вручную (переменная PUBIP)."
 ok "Публичный IP ноды: $PUBIP"
 
-# IP панели (для firewall) — резолвим хост панели
+# ВАЖНО: если панель спрятана за CDN (Cloudflare/…), DNS вернёт anycast-IP CDN,
+# а входящие соединения панель→нода придут с реального origin-IP. В этом случае
+# PANEL_IP передаётся явно: доверять первому входящему TCP-соединению небезопасно.
 PANEL_HOST="$(echo "$PANEL_URL" | sed -E 's~https?://~~; s~[:/].*$~~')"
-PANEL_IP="$(getent hosts "$PANEL_HOST" | awk '{print $1; exit}' || true)"
+PANEL_IP_EXPLICIT=""
+if [ -n "$PANEL_IP" ]; then
+  PANEL_IP_EXPLICIT=1
+else
+  # резолвим через python — надёжнее getent (тот может вернуть IPv6 первым)
+  PANEL_IP="$(python3 - "$PANEL_HOST" <<'PY' 2>/dev/null || true
+import socket, sys
+print(socket.gethostbyname(sys.argv[1]))
+PY
+)"
+fi
+
+# Известные диапазоны Cloudflare: их нельзя использовать как source-IP панели.
+_is_cloudflare_ip() {
+  python3 - "$1" <<'PY'
+import ipaddress, sys
+try:
+    ip = ipaddress.ip_address(sys.argv[1].strip())
+except ValueError:
+    raise SystemExit(0)
+nets = ("173.245.48.0/20","103.21.244.0/22","103.22.200.0/22","103.31.4.0/22",
+        "141.101.64.0/18","108.162.192.0/18","190.93.240.0/20","188.114.96.0/20",
+        "197.234.240.0/22","198.41.128.0/17","162.158.0.0/15","104.16.0.0/13",
+        "104.24.0.0/14","172.64.0.0/13","131.0.72.0/22","2606:4700::/32")
+for n in nets:
+    if ip in ipaddress.ip_network(n):
+        print("yes")
+        break
+PY
+}
+
+[ -n "$PANEL_IP" ] || die "Не смог определить IP панели. Задай PANEL_IP=реальный_origin_IP."
+python3 - "$PANEL_IP" <<'PY' || die "PANEL_IP должен быть корректным IPv4/IPv6-адресом."
+import ipaddress, sys
+ipaddress.ip_address(sys.argv[1])
+PY
+if [ "$(_is_cloudflare_ip "$PANEL_IP")" = "yes" ]; then
+  if [ -n "$PANEL_IP_EXPLICIT" ]; then
+    die "PANEL_IP указывает на Cloudflare. Задай реальный origin-IP панели, не CDN-IP."
+  fi
+  die "DNS панели ($PANEL_HOST) указывает на Cloudflare. Повтори с PANEL_IP=реальный_origin_IP."
+fi
+
+# curl-конфиг хранит секреты вне argv; файл доступен только root и удаляется при выходе.
+CURL_AUTH_CONFIG="$(mktemp /tmp/marzban-bootstrap-curl.XXXXXX)"
+chmod 600 "$CURL_AUTH_CONFIG"
+trap 'rm -f -- "$CURL_AUTH_CONFIG"' EXIT
+_curl_config_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+_write_curl_auth() {
+  : > "$CURL_AUTH_CONFIG"
+  printf 'header = "%s"\n' "$(_curl_config_escape "Authorization: Bearer $TOKEN")" >> "$CURL_AUTH_CONFIG"
+}
 
 # ---------- вспомогалка: JSON-поле через python3 ----------
 jget(){ python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))"; }
+
+# ---------- 0. память: swap + отключение мусорных демонов ----------
+# На мелких VPS Xray+Docker вместе с fwupd/packagekit легко ловят OOM (нода
+# зависает, SSH мрёт). Отключаем ненужные жоры памяти и ставим swap-страховку.
+echo; ok "Готовлю память (чистка демонов + swap)…"
+systemctl disable --now fwupd fwupd-refresh.timer packagekit >/dev/null 2>&1 || true
+if swapon --show 2>/dev/null | grep -q .; then
+  ok "swap уже есть."
+else
+  MEM_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+  if [ "${MEM_MB:-9999}" -lt 2048 ]; then
+    if [ ! -e /swapfile ]; then
+      fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+      chmod 600 /swapfile
+      mkswap /swapfile >/dev/null
+      swapon /swapfile
+      grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      ok "swap 2G включён (RAM ${MEM_MB}MB)."
+    fi
+  else
+    ok "RAM ${MEM_MB}MB — swap не нужен."
+  fi
+fi
 
 # ---------- 1. Docker ----------
 echo; ok "Ставлю Docker…"
@@ -65,13 +144,18 @@ ok "Docker готов."
 
 # ---------- 2. токен + cert панели ----------
 echo; ok "Логинюсь в панель, тяну client-cert…"
-TOKEN="$(curl -fsSL -X POST "$PANEL_URL/api/admin/token" \
-          -d "username=$PANEL_USER" -d "password=$PANEL_PASS" | jget access_token)"
+{
+  printf 'data-urlencode = "%s"\n' "$(_curl_config_escape "username=$PANEL_USER")"
+  printf 'data-urlencode = "%s"\n' "$(_curl_config_escape "password=$PANEL_PASS")"
+} > "$CURL_AUTH_CONFIG"
+TOKEN="$(curl -fsSL -X POST "$PANEL_URL/api/admin/token" --config "$CURL_AUTH_CONFIG" | jget access_token)"
 [ -n "$TOKEN" ] || die "Логин в панель не удался (проверь URL/логин/пароль)."
 
 mkdir -p /var/lib/marzban-node
-curl -fsSL "$PANEL_URL/api/node/settings" -H "Authorization: Bearer $TOKEN" \
+_write_curl_auth
+curl -fsSL "$PANEL_URL/api/node/settings" --config "$CURL_AUTH_CONFIG" \
   | jget certificate > /var/lib/marzban-node/ssl_client_cert.pem
+chmod 600 /var/lib/marzban-node/ssl_client_cert.pem
 [ -s /var/lib/marzban-node/ssl_client_cert.pem ] || die "Пустой cert от панели."
 head -1 /var/lib/marzban-node/ssl_client_cert.pem | grep -q "BEGIN CERT" \
   || die "cert панели не похож на PEM."
@@ -107,8 +191,7 @@ if [ -n "$PANEL_IP" ]; then
   ufw allow proto tcp from "$PANEL_IP" to any port "$XRAY_API_PORT" comment 'panel-xray' >/dev/null
   ok "node-порты $SERVICE_PORT/$XRAY_API_PORT открыты только для панели ($PANEL_IP)"
 else
-  warn "Не срезолвил IP панели ($PANEL_HOST) — открываю node-порты ВСЕМ (сузь потом вручную)."
-  ufw allow "${SERVICE_PORT}/tcp" >/dev/null; ufw allow "${XRAY_API_PORT}/tcp" >/dev/null
+  die "Внутренняя ошибка: IP панели не определён. UFW не будет открывать node-порты всем."
 fi
 ufw default deny incoming >/dev/null; ufw default allow outgoing >/dev/null
 ufw --force enable >/dev/null
@@ -117,7 +200,7 @@ ok "UFW включён."
 # ---------- 5. регистрация в панели ----------
 echo; ok "Регистрирую ноду в панели…"
 REG="$(curl -fsSL -X POST "$PANEL_URL/api/node" \
-        -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+        --config "$CURL_AUTH_CONFIG" -H "Content-Type: application/json" \
         -d "{\"name\":\"${NODE_NAME}\",\"address\":\"${PUBIP}\",\"port\":${SERVICE_PORT},\"api_port\":${XRAY_API_PORT},\"add_as_new_host\":true}" || true)"
 NODE_ID="$(echo "$REG" | jget id)"
 if [ -n "$NODE_ID" ]; then
