@@ -37,8 +37,8 @@ XRAY_API_PORT="${XRAY_API_PORT:-62051}"
 # (Cloudflare и т.п.) — DNS вернёт IP CDN, а входящие соединения панель→нода
 # придут с реального origin-IP. Тогда его обязательно надо задать вручную.
 PANEL_IP="${PANEL_IP:-}"
-# Порты инбаундов, открыть всем (REALITY обычно 443). Через пробел.
-INBOUND_PORTS="${INBOUND_PORTS:-443}"
+# Порты инбаундов, открыть всем. 443 (обычный HTTPS) + 8443 (наш REALITY).
+INBOUND_PORTS="${INBOUND_PORTS:-443 8443}"
 
 [ -n "$PANEL_URL" ]  || read -rp "URL главной панели (https://mon.домен): " PANEL_URL
 [ -n "$PANEL_USER" ] || read -rp "Логин админа панели: " PANEL_USER
