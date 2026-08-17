@@ -56,7 +56,8 @@ command -v unzip >/dev/null 2>&1 || apt-get install -y unzip -qq >/dev/null 2>&1
 unzip -o "$TMPDIR/xray.zip" -d "$TMPDIR/extracted" >/dev/null
 
 [ -x "$TMPDIR/extracted/xray" ] || die "В архиве нет исполняемого xray — сборка релиза изменилась?"
-NEWVER="$("$TMPDIR/extracted/xray" version | head -1)"
+NEWVER="$("$TMPDIR/extracted/xray" version | head -1 || true)"
+[ -n "$NEWVER" ] || die "Не смог прочитать версию из скачанного бинарника — архив побился?"
 ok "Скачано: $NEWVER"
 
 docker cp "$TMPDIR/extracted/xray" "$CONTAINER:/usr/local/bin/xray"
@@ -67,11 +68,22 @@ INVER="$(docker exec "$CONTAINER" xray version 2>/dev/null | head -1 || true)"
 [ "$INVER" = "$NEWVER" ] || die "После рестарта версия в контейнере не совпадает с установленной ($INVER). Смотри docker logs $CONTAINER."
 ok "В контейнере теперь: $INVER"
 
-if docker exec "$CONTAINER" sh -c 'command -v ss >/dev/null 2>&1 && ss -tlnp 2>/dev/null | grep -q xray' \
-   || ss -tlnp 2>/dev/null | grep -q 'users:(("xray"'; then
+# После docker restart контейнеру нужно время поднять supervisor, законнектиться
+# к панели и заспавнить xray заново — 4 сек на это не всегда хватает. В образе
+# marzban-node нет ss/netstat вообще (минимальный образ), поэтому смотрим с
+# ХОСТА — network_mode: host расшаривает сокеты напрямую. Ретраим вместо
+# одного разового замера, чтобы не пугать ложным warning на медленном старте.
+LISTENING=""
+for _ in 1 2 3 4 5 6; do
+  if ss -tlnp 2>/dev/null | grep -q 'users:(("xray"'; then
+    LISTENING=1; break
+  fi
+  sleep 2
+done
+if [ -n "$LISTENING" ]; then
   ok "xray слушает — процесс жив после апгрейда."
 else
-  warn "Не вижу xray среди слушающих сокетов — проверь docker logs $CONTAINER и core config в панели."
+  warn "За 16 сек не увидел xray среди слушающих сокетов хоста — проверь docker logs $CONTAINER и core config в панели."
 fi
 
 echo
