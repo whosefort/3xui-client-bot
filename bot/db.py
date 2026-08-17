@@ -62,6 +62,22 @@ def init(db_path: str) -> None:
             sent_at     INTEGER NOT NULL,
             PRIMARY KEY (tg_id, expiry_date, days_before)
         );
+
+        -- Одноразовые токены для авторазвёртывания ноды («Добавить сервер»):
+        -- бот регистрирует ноду в Marzban и тянет её cert сам, отдаёт токен —
+        -- новый VPS забирает cert по токену, пароль от панели никуда не летит.
+        CREATE TABLE IF NOT EXISTS node_tokens (
+            token       TEXT PRIMARY KEY,
+            node_id     INTEGER NOT NULL,
+            node_name   TEXT NOT NULL,
+            address     TEXT NOT NULL,
+            cert_pem    TEXT NOT NULL,
+            panel_ip    TEXT NOT NULL,
+            created_at  INTEGER NOT NULL,
+            expires_at  INTEGER NOT NULL,
+            used_at     INTEGER,
+            created_by  INTEGER NOT NULL
+        );
         """
     )
     _conn.commit()
@@ -194,3 +210,32 @@ def mark_reminded(tg_id: int, expiry_date: str, days_before: int) -> None:
             (tg_id, expiry_date, days_before, int(time.time())),
         )
         _c().commit()
+
+
+# ---------- node_tokens (авторазвёртывание нод) ----------
+
+def create_node_token(token: str, node_id: int, node_name: str, address: str,
+                      cert_pem: str, panel_ip: str, ttl_seconds: int, created_by: int) -> None:
+    now = int(time.time())
+    with _lock:
+        _c().execute(
+            "INSERT INTO node_tokens(token,node_id,node_name,address,cert_pem,panel_ip,"
+            "created_at,expires_at,created_by) VALUES(?,?,?,?,?,?,?,?,?)",
+            (token, node_id, node_name, address, cert_pem, panel_ip,
+             now, now + ttl_seconds, created_by),
+        )
+        _c().commit()
+
+
+def claim_node_token(token: str) -> Optional[sqlite3.Row]:
+    """Атомарно: если токен валиден и ещё не использован — гасит его и
+    возвращает данные. Ни await, ни второй SQL-вызов между проверкой и
+    UPDATE не встревает — гонки внутри одного event loop исключены."""
+    now = int(time.time())
+    with _lock:
+        row = _c().execute("SELECT * FROM node_tokens WHERE token=?", (token,)).fetchone()
+        if not row or row["used_at"] is not None or row["expires_at"] < now:
+            return None
+        _c().execute("UPDATE node_tokens SET used_at=? WHERE token=?", (now, token))
+        _c().commit()
+        return row

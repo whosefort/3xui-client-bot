@@ -13,6 +13,14 @@ services:
       # просто не бэкапится (Docker не создаёт «битую» директорию при отсутствии
       # файла). Доступ для non-root контейнера настраивает deploy.sh (ACL).
       - ${XUI_DB_HOST_PATH:-/dev/null}:/backup-src/x-ui.db:ro
+      # Для «Добавить сервер» (NODE_PROVISION_ENABLED=true): TLS-сертификат
+      # того же домена, что уже использует Marzban на 443 — Cloudflare
+      # проксирует alt-порты (8443 и т.п.) как HTTPS и ждёт валидный TLS от
+      # origin, голым HTTP получишь 525. Путь переопределяем через
+      # MARZBAN_CERT_DIR, если панель не на этой же машине/не в этом пути.
+      # Если каталога нет — бот просто не поднимет TLS на порту провижининга
+      # (см. bot/http_api.py), сама панель этим не затронута.
+      - ${MARZBAN_CERT_DIR:-/var/lib/marzban/certs}:/app/marzban-certs:ro
     # Если панель слушает на localhost хоста (127.0.0.1) — даём боту доступ
     # к сети хоста, чтобы XUI_BASE_URL мог быть http://127.0.0.1:PORT/...
     network_mode: host

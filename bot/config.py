@@ -70,6 +70,14 @@ class Config:
     marzban_proxies: Optional[dict] = field(default_factory=lambda: _json("MARZBAN_PROXIES", None))
     marzban_inbounds: Optional[dict] = field(default_factory=lambda: _json("MARZBAN_INBOUNDS", None))
 
+    # Авторазвёртывание нод («Добавить сервер»): локальный HTTP-порт, по которому
+    # bootstrap_token.sh забирает cert новой ноды по одноразовому токену.
+    # Не 443/80 — те уже заняты панелью. Порт из списка, который Cloudflare
+    # проксирует для любого домена без доп. настройки (443/2053/2083/2087/2096/8443).
+    node_provision_enabled: bool = _env_bool("NODE_PROVISION_ENABLED", False)
+    node_provision_port: int = _safe_int(os.getenv("NODE_PROVISION_PORT", "8443"), 8443)
+    node_token_ttl_seconds: int = _safe_int(os.getenv("NODE_TOKEN_TTL_SECONDS", "1800"), 1800)
+
     # 3X-UI
     xui_base_url: str = os.getenv("XUI_BASE_URL", "").rstrip("/")
     xui_auth: str = os.getenv("XUI_AUTH", "token")  # token | login

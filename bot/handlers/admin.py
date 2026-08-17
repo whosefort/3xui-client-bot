@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import ipaddress
 import logging
 
 from aiogram import F, Router
@@ -17,7 +18,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from .. import db, keyboards as kb, texts
+from .. import db, keyboards as kb, node_provision, texts
 from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
@@ -46,6 +47,7 @@ class AdminFSM(StatesGroup):
     set_price = State()
     set_req = State()
     set_traffic = State()        # ждём новый месячный лимит трафика (ГБ)
+    add_server = State()         # ждём "IP [имя]" новой ноды
 
 
 # ---------- форматирование ----------
@@ -103,12 +105,16 @@ def _card_text(cl: Client, umap: dict[int, str]) -> str:
 #  ВХОД В АДМИНКУ
 # =====================================================================
 
+def _add_server_available() -> bool:
+    return config.panel_backend == "marzban" and config.node_provision_enabled
+
+
 @router.message(Command("start", "admin", "panel"))
 async def adm_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "🛠 <b>Админ-панель</b>\nВыберите действие на клавиатуре ниже.",
-        reply_markup=admin_kb(),
+        reply_markup=admin_kb(_add_server_available()),
     )
 
 
@@ -121,7 +127,7 @@ async def cmd_help(message: Message) -> None:
         "/requisites &lt;текст&gt; — реквизиты\n"
         "/grant &lt;tg_id&gt; — выдать вручную\n"
         "/broadcast &lt;текст&gt; — рассылка\n",
-        reply_markup=admin_kb(),
+        reply_markup=admin_kb(_add_server_available()),
     )
 
 
@@ -902,6 +908,74 @@ async def cmd_broadcast(message: Message) -> None:
         return
     sent, failed = await _do_broadcast(text)
     await message.answer(f"📢 Рассылка завершена. Доставлено: {sent}, ошибок: {failed}")
+
+
+# =====================================================================
+#  ДОБАВИТЬ СЕРВЕР (авторазвёртывание ноды)
+# =====================================================================
+
+@router.message(F.text == kb.ADM_ADD_SERVER)
+async def kb_add_server(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if not _add_server_available():
+        await message.answer(
+            "Недоступно: нужен PANEL_BACKEND=marzban и NODE_PROVISION_ENABLED=true в .env."
+        )
+        return
+    await state.set_state(AdminFSM.add_server)
+    await message.answer(
+        "🖥 Пришли <b>публичный IP</b> новой ноды. Можно через пробел добавить имя:\n"
+        "<code>172.86.66.170 eu-frankfurt-02</code>\n\n"
+        "VPS должен быть чистым (Ubuntu/Debian), root-доступ понадобится тебе — "
+        "не мне и не боту, я его не спрашиваю."
+    )
+
+
+@router.message(AdminFSM.add_server, F.text)
+async def add_server_input(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    parts = (message.text or "").strip().split(maxsplit=1)
+    if not parts:
+        await message.answer("Пусто. Отменено.")
+        return
+    address = parts[0]
+    name = parts[1].strip() if len(parts) > 1 else address
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        await message.answer(f"«{address}» не похож на IP-адрес. Отменено.")
+        return
+
+    await message.answer("Регистрирую ноду в панели…")
+    try:
+        reg = await node_provision.register_node(name, address)
+    except node_provision.ProvisionError as e:
+        await message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("add_server: register_node failed")
+        await message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+
+    token = node_provision.new_token()
+    db.create_node_token(
+        token=token, node_id=reg["node_id"], node_name=name, address=address,
+        cert_pem=reg["cert_pem"], panel_ip=reg["panel_ip"],
+        ttl_seconds=config.node_token_ttl_seconds, created_by=message.from_user.id,
+    )
+
+    claim_url = f"{config.marzban_url}:{config.node_provision_port}/nodeprovision/claim"
+    ttl_min = config.node_token_ttl_seconds // 60
+    cmd = (
+        f"curl -fsSL https://raw.githubusercontent.com/whosefort/3xui-client-bot/main/"
+        f"node/bootstrap_token.sh | NODE_TOKEN={token} CLAIM_URL={claim_url} bash"
+    )
+    await message.answer(
+        f"✅ Нода id={reg['node_id']} зарегистрирована в панели ({address}).\n"
+        f"Токен живёт {ttl_min} мин, одноразовый.\n\n"
+        f"Вставь эту команду в SSH-сессию нового VPS (под root):\n\n"
+        f"<code>{html.escape(cmd)}</code>"
+    )
 
 
 # ---------- утилиты ----------

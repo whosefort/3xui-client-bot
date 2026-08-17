@@ -53,9 +53,10 @@ ADM_CLIENTS = "👥 Клиенты"
 ADM_GRANT = "➕ Выдать вручную"
 ADM_SETTINGS = "💳 Цена/реквизиты"
 ADM_BROADCAST = "📢 Рассылка"
+ADM_ADD_SERVER = "🖥 Добавить сервер"
 
 
-def admin_kb() -> ReplyKeyboardMarkup:
+def admin_kb(show_add_server: bool = False) -> ReplyKeyboardMarkup:
     """Постоянная клавиатура под полем ввода у админа."""
     kb = ReplyKeyboardBuilder()
     kb.button(text=ADM_REQUESTS)
@@ -64,7 +65,11 @@ def admin_kb() -> ReplyKeyboardMarkup:
     kb.button(text=ADM_GRANT)
     kb.button(text=ADM_SETTINGS)
     kb.button(text=ADM_BROADCAST)
-    kb.adjust(2, 2, 2)
+    rows = [2, 2, 2]
+    if show_add_server:
+        kb.button(text=ADM_ADD_SERVER)
+        rows.append(1)
+    kb.adjust(*rows)
     return kb.as_markup(resize_keyboard=True, is_persistent=True)
 
 

@@ -9,7 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from . import db, runtime
+from . import db, http_api, runtime
 from .config import config
 from .handlers import setup_routers
 from .panels import build_panel
@@ -38,11 +38,22 @@ async def main() -> None:
     sched.start()
     log.info("Планировщик запущен (напоминания в %02d:00 МСК)", config.remind_hour)
 
+    http_runner = None
+    if config.node_provision_enabled:
+        # Единственное осознанное исключение из "никаких входящих портов" —
+        # см. bot/http_api.py. Выключено, пока явно не попросили в .env.
+        http_runner = await http_api.start(http_api.build_app())
+        log.warning("NODE_PROVISION_ENABLED=true — открыт входящий порт %d "
+                   "(node/bootstrap_token.sh). Это осознанное отступление от "
+                   "long-polling-only.", config.node_provision_port)
+
     try:
         log.info("Бот стартует (long-polling)…")
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
+        if http_runner is not None:
+            await http_runner.cleanup()
         sched.shutdown(wait=False)
         await runtime.panel.close()
         await bot.session.close()
