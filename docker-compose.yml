@@ -13,6 +13,9 @@ services:
       # просто не бэкапится (Docker не создаёт «битую» директорию при отсутствии
       # файла). Доступ для non-root контейнера настраивает deploy.sh (ACL).
       - ${XUI_DB_HOST_PATH:-/dev/null}:/backup-src/x-ui.db:ro
+      # То же самое для Marzban (PANEL_BACKEND=marzban) — путь на хосте берётся
+      # из MARZBAN_DB_HOST_PATH, обычно /var/lib/marzban/db.sqlite3.
+      - ${MARZBAN_DB_HOST_PATH:-/dev/null}:/backup-src/marzban.db:ro
       # Для «Добавить сервер» (NODE_PROVISION_ENABLED=true): TLS-сертификат
       # того же домена, что уже использует Marzban на 443 — Cloudflare
       # проксирует alt-порты (8443 и т.п.) как HTTPS и ждёт валидный TLS от

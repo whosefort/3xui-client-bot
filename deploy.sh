@@ -215,7 +215,7 @@ if [ "${SKIP_SETUP:-0}" -eq 0 ]; then
     echo -e "  ${BOLD}── Бэкап в Cloudflare R2 (опционально) ───────────────${NC}"
     BACKUP_ENABLED=false
     R2_ENDPOINT=""; R2_BUCKET=""; R2_ACCESS_KEY_ID=""; R2_SECRET_ACCESS_KEY=""; BACKUP_AGE_PUBKEY=""
-    XUI_DB_HOST_PATH=""
+    XUI_DB_HOST_PATH=""; MARZBAN_DB_HOST_PATH=""
     read -rp "  Включить ежедневный бэкап БД в R2? [y/N] " BK
     if [[ "${BK:-N}" =~ ^[Yy]$ ]]; then
         BACKUP_ENABLED=true
@@ -229,6 +229,9 @@ if [ "${SKIP_SETUP:-0}" -eq 0 ]; then
         if [ "$PANEL_BACKEND" = "xui" ]; then
             echo "  Путь к x-ui.db на хосте (Enter — без бэкапа x-ui, только bot.db):"
             ask_optional XUI_DB_HOST_PATH "XUI_DB_HOST_PATH" "/etc/x-ui/x-ui.db"
+        else
+            echo "  Путь к db.sqlite3 Marzban на хосте (Enter — без бэкапа Marzban, только bot.db):"
+            ask_optional MARZBAN_DB_HOST_PATH "MARZBAN_DB_HOST_PATH" "/var/lib/marzban/db.sqlite3"
         fi
     fi
 
@@ -290,6 +293,7 @@ R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
 R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
 BACKUP_AGE_PUBKEY=${BACKUP_AGE_PUBKEY}
 XUI_DB_HOST_PATH=${XUI_DB_HOST_PATH}
+MARZBAN_DB_HOST_PATH=${MARZBAN_DB_HOST_PATH}
 EOF
 
     ok ".env создан"

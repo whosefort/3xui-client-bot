@@ -27,8 +27,12 @@ from .config import config
 
 log = logging.getLogger("backup")
 
-# Путь к x-ui.db ВНУТРИ контейнера (монтируется RO из docker-compose).
+# Пути к БД панели ВНУТРИ контейнера (монтируются RO из docker-compose).
+# Задействован только тот, что соответствует PANEL_BACKEND — второй источник
+# в docker-compose смотрит на /dev/null, если хост-путь не задан, поэтому
+# лишняя проверка isfile() ниже сама всё уберёт.
 XUI_DB_PATH = os.getenv("XUI_DB_PATH", "/backup-src/x-ui.db")
+MARZBAN_DB_PATH = os.getenv("MARZBAN_DB_PATH", "/backup-src/marzban.db")
 
 
 def effective_enabled() -> bool:
@@ -137,14 +141,21 @@ async def run_backup() -> str:
         expect_enc = bool((config.backup_age_pubkey or "").strip())
         stamp = time.strftime("%Y-%m-%d", time.gmtime())
         ts = int(time.time())
-        # x-ui.db бэкапим только если это реальный непустой файл. По умолчанию в
-        # docker-compose туда подставлен /dev/null (не regular file) — тогда просто
-        # пропускаем, без ошибок и без риска создать «битую» директорию.
+        # БД панели бэкапим только если это реальный непустой файл. По умолчанию
+        # в docker-compose туда подставлен /dev/null (не regular file) — тогда
+        # просто пропускаем, без ошибок и без риска создать «битую» директорию.
         sources = [("bot", config.db_path)]
-        if os.path.isfile(XUI_DB_PATH) and os.path.getsize(XUI_DB_PATH) > 0:
-            sources.append(("x-ui", XUI_DB_PATH))
+        if config.panel_backend == "marzban":
+            if os.path.isfile(MARZBAN_DB_PATH) and os.path.getsize(MARZBAN_DB_PATH) > 0:
+                sources.append(("marzban", MARZBAN_DB_PATH))
+            else:
+                log.warning("marzban db.sqlite3 недоступен (%s, задай MARZBAN_DB_HOST_PATH) — "
+                           "бэкаплю только bot.db", MARZBAN_DB_PATH)
         else:
-            log.warning("x-ui.db недоступен (%s) — бэкаплю только bot.db", XUI_DB_PATH)
+            if os.path.isfile(XUI_DB_PATH) and os.path.getsize(XUI_DB_PATH) > 0:
+                sources.append(("x-ui", XUI_DB_PATH))
+            else:
+                log.warning("x-ui.db недоступен (%s) — бэкаплю только bot.db", XUI_DB_PATH)
 
         tmpdir = None
         ok_parts, fail_parts, enc_count = [], [], 0
