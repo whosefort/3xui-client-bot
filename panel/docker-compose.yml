@@ -1,0 +1,11 @@
+services:
+  marzban:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/marzban-sidfix:1
+    restart: always
+    env_file: .env
+    network_mode: host
+    volumes:
+      - /var/lib/marzban:/var/lib/marzban

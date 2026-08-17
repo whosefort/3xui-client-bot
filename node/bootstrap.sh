@@ -181,6 +181,46 @@ EOF
 ( cd /opt/marzban-node && docker compose up -d )
 ok "marzban-node запущен."
 
+# ---------- 3.5. свежий xray-core ----------
+# gozargah/marzban-node:latest тащит xray-core, вмороженный в образ на момент
+# сборки — он отстаёт от того, что реально используют клиентские приложения
+# (Happ, v2rayNG и т.п. часто следят за pre-release тегами XTLS). REALITY —
+# протокол с меняющейся схемой (напр. post-quantum mldsa65-поля). Рассинхрон
+# версий даёт классический симптом: клиент рвёт соединение с логом
+#   "REALITY: received real certificate (potential MITM or redirection)"
+# Ставим последний тег XTLS/Xray-core (включая pre-release) поверх того, что в
+# образе. См. node/TROUBLESHOOTING.md.
+echo; ok "Обновляю xray-core до актуальной версии (совместимость с клиентами)…"
+XRAY_TARGET_VER="${XRAY_VERSION:-}"
+if [ -z "$XRAY_TARGET_VER" ]; then
+  XRAY_TARGET_VER="$(curl -fsSL "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['tag_name'])" 2>/dev/null || true)"
+fi
+if [ -n "$XRAY_TARGET_VER" ]; then
+  XTMP="$(mktemp -d)"
+  if curl -fsSL --max-time 90 -o "$XTMP/xray.zip" \
+      "https://github.com/XTLS/Xray-core/releases/download/${XRAY_TARGET_VER}/Xray-linux-64.zip" 2>/dev/null; then
+    apt-get install -y unzip -qq >/dev/null 2>&1 || true
+    unzip -o "$XTMP/xray.zip" -d "$XTMP/x" >/dev/null 2>&1
+    if [ -x "$XTMP/x/xray" ]; then
+      docker cp "$XTMP/x/xray" marzban-node-marzban-node-1:/usr/local/bin/xray
+      docker restart marzban-node-marzban-node-1 >/dev/null
+      sleep 4
+      XRAY_INSTALLED="$(docker exec marzban-node-marzban-node-1 xray version 2>/dev/null | head -1 || true)"
+      ok "xray-core обновлён: ${XRAY_INSTALLED:-см. docker exec marzban-node-marzban-node-1 xray version}"
+    else
+      warn "Архив xray-core скачался, но бинарник не нашёлся внутри — оставляю версию из образа."
+    fi
+  else
+    warn "Не смог скачать xray-core ${XRAY_TARGET_VER} — оставляю версию из образа marzban-node."
+  fi
+  rm -rf -- "$XTMP"
+else
+  warn "Не смог определить актуальную версию xray-core (GitHub недоступен?) — оставляю версию из образа."
+fi
+warn "Замена бинарника живёт в writable layer контейнера — переживёт restart/reboot, но НЕ 'docker compose up --force-recreate'."
+warn "Для повторного апгрейда позже: node/upgrade_xray.sh на самой ноде."
+
 # ---------- 4. firewall ----------
 echo; ok "Настраиваю UFW…"
 apt-get install -y ufw >/dev/null 2>&1 || true
@@ -212,7 +252,11 @@ fi
 
 echo
 echo -e "${G}ГОТОВО.${NC}"
+echo "xray-core на ноде: ${XRAY_INSTALLED:-версия из образа marzban-node, см. warn выше}"
 echo "Проверь в панели: нода должна стать 'connected' за ~10-30 сек."
 echo "Логи ноды:  cd /opt/marzban-node && docker compose logs -f"
 echo "Далее: опиши REALITY-инбаунд в САМОЙ панели (Core Config / Hosts) — нода его подхватит,"
 echo "а add_as_new_host уже добавил адрес $PUBIP в Hosts, так что ссылки поедут на эту ноду."
+echo
+echo "Если у живых клиентов REALITY не пингуется ('received real certificate' в логе клиента) —"
+echo "это почти всегда рассинхрон версий xray-core клиент/сервер. См. node/TROUBLESHOOTING.md."

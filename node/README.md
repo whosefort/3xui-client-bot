@@ -24,14 +24,26 @@ PANEL_URL=https://mon.your-domain.tld bash bootstrap.sh
 1. Ставит Docker.
 2. Тянет client-cert панели (`GET /api/node/settings`) → `/var/lib/marzban-node/ssl_client_cert.pem`.
 3. Поднимает `marzban-node` (docker, `network_mode: host`, protocol `rest`).
-4. UFW: 443 всем, node-порты 62050/62051 — только с IP панели, SSH.
-5. Регистрирует ноду (`POST /api/node`, `add_as_new_host=true`) — адрес ноды сам
+4. Обновляет xray-core внутри контейнера до актуального тега XTLS (образ
+   marzban-node часто отстаёт от того, что используют клиентские приложения —
+   см. `TROUBLESHOOTING.md`).
+5. UFW: 443 всем, node-порты 62050/62051 — только с IP панели, SSH.
+6. Регистрирует ноду (`POST /api/node`, `add_as_new_host=true`) — адрес ноды сам
    попадает в Hosts инбаундов, ссылки клиентов поедут на неё.
 
 ## После
 - В панели нода станет `connected` за ~10–30 сек. Логи: `cd /opt/marzban-node && docker compose logs -f`.
 - **REALITY-инбаунд описывается в САМОЙ панели** (Core Config / Hosts) — разово. Нода
   служит то, что панель раскатает.
+- Клиент не подключается / "не пингуется", хотя нода `connected`? →
+  [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) — сначала проверить версию
+  xray-core (`upgrade_xray.sh`), это самая частая причина.
+
+## Обслуживание
+- `upgrade_xray.sh` — подтянуть свежий xray-core на уже работающей ноде, без
+  полного bootstrap. Переживает `restart`/reboot, не переживает
+  `docker compose up --force-recreate` — гонять заново после пересоздания
+  контейнера.
 
 ## Безопасность
 - Главная панель — «мозг», трафик не возит. Ноды — «скот», возят трафик, IP расходный.
