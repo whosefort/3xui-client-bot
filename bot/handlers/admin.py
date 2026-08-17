@@ -925,7 +925,7 @@ async def kb_add_server(message: Message, state: FSMContext) -> None:
     await state.set_state(AdminFSM.add_server)
     await message.answer(
         "🖥 Пришли <b>публичный IP</b> новой ноды. Можно через пробел добавить имя:\n"
-        "<code>172.86.66.170 eu-frankfurt-02</code>\n\n"
+        "<code>203.0.113.10 eu-frankfurt-02</code>\n\n"
         "VPS должен быть чистым (Ubuntu/Debian), root-доступ понадобится тебе — "
         "не мне и не боту, я его не спрашиваю."
     )
