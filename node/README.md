@@ -80,6 +80,12 @@ PANEL_URL=https://mon.your-domain.tld bash bootstrap.sh
   контейнера). Ставь в cron раз в день — см. шапку файла. Отдельно — раз в
   неделю тихий пинг, если апстрим XTLS ушёл вперёд пина (клиенты обновляются
   сами, ноды — нет; без этого пинга дрейф можно было бы не заметить месяцами).
+- `run_drift_check.sh` — обёртка для cron: сама берёт креды из `.env` бота
+  (`MARZBAN_URL/USERNAME/PASSWORD` → `PANEL_URL/USER/PASS`) и пин из
+  `XRAY_VERSION`, чтобы не дублировать секреты в crontab открытым текстом.
+  ```
+  0 9 * * * cd /path/to/repo && bash node/run_drift_check.sh >> /var/log/xray_drift.log 2>&1
+  ```
 
 ## Безопасность
 - Главная панель — «мозг», трафик не возит. Ноды — «скот», возят трафик, IP расходный.
