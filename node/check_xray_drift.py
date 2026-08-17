@@ -22,6 +22,12 @@ GitHub при этом всё равно проверяется — если т�
 админа: обновление пина — осознанное решение (проверить новую версию с живым
 клиентом, обновить node/XRAY_VERSION), не автоматика.
 
+Про новее-чем-пин на GitHub: раз в NUDGE_INTERVAL_DAYS (по умолчанию 7) шлёт
+ОДИН тихий Telegram-пинг "апстрим ушёл вперёд, пин пора пересмотреть" — не
+каждый прогон крона, иначе это тоже станет шумом. Состояние (когда пинговали
+последний раз) — в DRIFT_STATE_FILE (по умолчанию рядом со скриптом, в
+.gitignore, это runtime-состояние, не код).
+
 Переменные окружения (совпадают по именам с bot/.env, специально):
   PANEL_URL, PANEL_USER, PANEL_PASS   — админ-доступ к панели
   BOT_TOKEN                           — токен телеграм-бота (для алерта)
@@ -29,6 +35,8 @@ GitHub при этом всё равно проверяется — если т�
   XRAY_TARGET_VERSION                 — пин из node/XRAY_VERSION (напр. v26.7.11).
                                          Не задан — сверка идёт с GitHub latest,
                                          но тогда жди шумных алертов каждую неделю.
+  NUDGE_INTERVAL_DAYS                 — раз в сколько дней слать "апстрим новее" (по умолчанию 7).
+  DRIFT_STATE_FILE                    — путь к файлу состояния (по умолчанию node/.drift_nudge_state.json).
 
 Запуск руками:
   PANEL_URL=... PANEL_USER=... PANEL_PASS=... BOT_TOKEN=... ADMIN_IDS=123,456 \
@@ -45,11 +53,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+DEFAULT_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".drift_nudge_state.json")
 
 
 def _req(req: urllib.request.Request, timeout: int = 30):
@@ -86,6 +96,22 @@ def ver_tuple(tag: str) -> tuple[int, ...]:
         return (0,)
 
 
+def read_last_nudge_ts(state_file: str) -> float:
+    try:
+        with open(state_file) as f:
+            return float(json.load(f).get("last_nudge_ts", 0))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return 0.0
+
+
+def write_last_nudge_ts(state_file: str, ts: float) -> None:
+    try:
+        with open(state_file, "w") as f:
+            json.dump({"last_nudge_ts": ts}, f)
+    except OSError as e:
+        print(f"не смог записать {state_file}: {e} — тихий пинг может повториться на следующем прогоне", file=sys.stderr)
+
+
 def send_telegram(bot_token: str, chat_id: str, text: str) -> None:
     data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
     req = urllib.request.Request(
@@ -104,6 +130,8 @@ def main() -> int:
     bot_token = os.environ.get("BOT_TOKEN", "")
     admin_ids = [a.strip() for a in os.environ.get("ADMIN_IDS", "").split(",") if a.strip()]
     target_version = os.environ.get("XRAY_TARGET_VERSION", "")
+    nudge_interval_days = float(os.environ.get("NUDGE_INTERVAL_DAYS", "7") or 7)
+    state_file = os.environ.get("DRIFT_STATE_FILE", DEFAULT_STATE_FILE)
 
     missing = [n for n, v in (("PANEL_URL", panel_url), ("PANEL_USER", panel_user), ("PANEL_PASS", panel_pass)) if not v]
     if missing:
@@ -122,8 +150,22 @@ def main() -> int:
     target_v = ver_tuple(target_version)
 
     if ver_tuple(latest) > target_v:
-        print(f"(инфо, не алерт) на GitHub есть новее пина: {latest} > {target_version}. "
+        print(f"на GitHub есть новее пина: {latest} > {target_version}. "
               f"Проверь с живым клиентом и обнови node/XRAY_VERSION, если ок.")
+        age_days = (time.time() - read_last_nudge_ts(state_file)) / 86400
+        if age_days >= nudge_interval_days:
+            if bot_token and admin_ids:
+                nudge = (
+                    f"ℹ️ Апстрим XTLS ушёл вперёд пина: {latest} (у нас зафиксировано {target_version}).\n"
+                    f"Не срочно — сами клиенты пока не обязательно обновились. Но раньше это уже "
+                    f"ломало REALITY молча (см. node/TROUBLESHOOTING.md #1). Если заметишь жалобы "
+                    f"на 'не пингуется' — проверь версию у живого клиента, протестируй новую "
+                    f"версию (XRAY_VERSION={latest} bash node/upgrade_xray.sh) и обнови node/XRAY_VERSION."
+                )
+                for chat_id in admin_ids:
+                    send_telegram(bot_token, chat_id, nudge)
+                write_last_nudge_ts(state_file, time.time())
+                print(f"тихий пинг отправлен (следующий не раньше чем через {nudge_interval_days:g} дн.)")
 
     stale = []
     for n in nodes:

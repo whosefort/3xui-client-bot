@@ -127,33 +127,74 @@ if [ "${SKIP_SETUP:-0}" -eq 0 ]; then
     ask_optional SUPPORT_CHAT_ID "SUPPORT_CHAT_ID" "$ADMIN_IDS"
 
     echo ""
-    # ── 3X-UI ─────────────────────────────────────────────────────────────────
-    echo -e "  ${BOLD}── 3X-UI панель ──────────────────────────────────────${NC}"
-    echo "  Базовый URL панели: https://домен:порт/секретный-путь"
-    echo "  (без /panel на конце; секретный путь — из настроек панели)"
-    ask         XUI_BASE_URL  "XUI_BASE_URL"
-    echo ""
-    echo "  API-токен панели (Настройки → API Token в 3X-UI)."
-    ask_secret  XUI_API_TOKEN "XUI_API_TOKEN"
-    echo ""
-    echo "  Если используете логин/пароль вместо токена — введите логин (иначе Enter)."
-    ask_optional XUI_USERNAME "XUI_USERNAME (Enter — пропустить)"
-    if [ -n "$XUI_USERNAME" ]; then
-        ask_secret_optional XUI_PASSWORD "XUI_PASSWORD"
-    else
-        XUI_PASSWORD=""
-    fi
-    echo ""
-    echo "  2FA-секрет панели, если включена двухфакторка (иначе Enter)."
-    ask_secret_optional XUI_2FA_SECRET "XUI_2FA_SECRET"
+    # ── Бэкенд панели ─────────────────────────────────────────────────────────
+    echo -e "  ${BOLD}── Какая панель? ──────────────────────────────────────${NC}"
+    echo "  1) 3x-ui"
+    echo "  2) Marzban"
+    ask PANEL_BACKEND_CHOICE "Номер" "1"
+    case "$PANEL_BACKEND_CHOICE" in
+        2) PANEL_BACKEND="marzban" ;;
+        *) PANEL_BACKEND="xui" ;;
+    esac
+    ok "Бэкенд: $PANEL_BACKEND"
+
+    # значения по умолчанию — чтобы .env-heredoc ниже не падал на неопределённых
+    # переменных, если ветка для другого бэкенда не выполнялась
+    XUI_BASE_URL=""; XUI_AUTH="token"; XUI_API_TOKEN=""; XUI_USERNAME=""; XUI_PASSWORD=""; XUI_2FA_SECRET=""
+    SUB_URL_TEMPLATE=""
+    MARZBAN_URL=""; MARZBAN_USERNAME=""; MARZBAN_PASSWORD=""; MARZBAN_RESET_STRATEGY="month"
+    MARZBAN_PROXIES=""; MARZBAN_INBOUNDS=""
 
     echo ""
-    # ── Подписка ───────────────────────────────────────────────────────────────
-    echo -e "  ${BOLD}── Ссылка-подписка ───────────────────────────────────${NC}"
-    echo "  Шаблон sub-ссылки. Возьмите рабочую ссылку из панели"
-    echo "  (Clients → скопировать ссылку подписки) и замените subId на {subId}."
-    echo "  Пример: https://your-domain.tld:ПОРТ/путь/{subId}"
-    ask         SUB_URL_TEMPLATE "SUB_URL_TEMPLATE"
+    if [ "$PANEL_BACKEND" = "marzban" ]; then
+        # ── Marzban ───────────────────────────────────────────────────────────
+        echo -e "  ${BOLD}── Marzban панель ──────────────────────────────────${NC}"
+        echo "  URL главной панели: https://mon.your-domain.tld (без слэша на конце)"
+        ask         MARZBAN_URL      "MARZBAN_URL"
+        echo ""
+        echo "  Логин админа панели."
+        ask         MARZBAN_USERNAME "MARZBAN_USERNAME"
+        echo ""
+        echo "  Пароль админа панели."
+        ask_secret  MARZBAN_PASSWORD "MARZBAN_PASSWORD"
+        echo ""
+        echo "  Стратегия сброса трафика клиента: month | no_reset."
+        ask_optional MARZBAN_RESET_STRATEGY "MARZBAN_RESET_STRATEGY" "month"
+        echo ""
+        echo "  Продвинутое (Enter — пропустить, бот сам возьмёт ВСЕ инбаунды панели):"
+        echo "  JSON proxies, например {\"vless\":{\"flow\":\"xtls-rprx-vision\"}}"
+        ask_optional MARZBAN_PROXIES "MARZBAN_PROXIES (Enter — пропустить)"
+        echo "  JSON inbounds, например {\"vless\":[\"VLESS REALITY\"]}"
+        ask_optional MARZBAN_INBOUNDS "MARZBAN_INBOUNDS (Enter — пропустить)"
+    else
+        # ── 3X-UI ─────────────────────────────────────────────────────────────────
+        echo -e "  ${BOLD}── 3X-UI панель ──────────────────────────────────────${NC}"
+        echo "  Базовый URL панели: https://домен:порт/секретный-путь"
+        echo "  (без /panel на конце; секретный путь — из настроек панели)"
+        ask         XUI_BASE_URL  "XUI_BASE_URL"
+        echo ""
+        echo "  API-токен панели (Настройки → API Token в 3X-UI)."
+        ask_secret  XUI_API_TOKEN "XUI_API_TOKEN"
+        echo ""
+        echo "  Если используете логин/пароль вместо токена — введите логин (иначе Enter)."
+        ask_optional XUI_USERNAME "XUI_USERNAME (Enter — пропустить)"
+        if [ -n "$XUI_USERNAME" ]; then
+            ask_secret_optional XUI_PASSWORD "XUI_PASSWORD"
+        else
+            XUI_PASSWORD=""
+        fi
+        echo ""
+        echo "  2FA-секрет панели, если включена двухфакторка (иначе Enter)."
+        ask_secret_optional XUI_2FA_SECRET "XUI_2FA_SECRET"
+
+        echo ""
+        # ── Подписка ───────────────────────────────────────────────────────────────
+        echo -e "  ${BOLD}── Ссылка-подписка ───────────────────────────────────${NC}"
+        echo "  Шаблон sub-ссылки. Возьмите рабочую ссылку из панели"
+        echo "  (Clients → скопировать ссылку подписки) и замените subId на {subId}."
+        echo "  Пример: https://your-domain.tld:ПОРТ/путь/{subId}"
+        ask         SUB_URL_TEMPLATE "SUB_URL_TEMPLATE"
+    fi
 
     echo ""
     # ── Тариф ──────────────────────────────────────────────────────────────────
@@ -185,8 +226,10 @@ if [ "${SKIP_SETUP:-0}" -eq 0 ]; then
         ask_secret  R2_SECRET_ACCESS_KEY "R2 Secret Access Key"
         echo "  age-публичный ключ для шифрования (age1...), Enter — без шифрования:"
         ask_optional BACKUP_AGE_PUBKEY "BACKUP_AGE_PUBKEY"
-        echo "  Путь к x-ui.db на хосте (Enter — без бэкапа x-ui, только bot.db):"
-        ask_optional XUI_DB_HOST_PATH "XUI_DB_HOST_PATH" "/etc/x-ui/x-ui.db"
+        if [ "$PANEL_BACKEND" = "xui" ]; then
+            echo "  Путь к x-ui.db на хосте (Enter — без бэкапа x-ui, только bot.db):"
+            ask_optional XUI_DB_HOST_PATH "XUI_DB_HOST_PATH" "/etc/x-ui/x-ui.db"
+        fi
     fi
 
     # ── Запись .env ────────────────────────────────────────────────────────────
@@ -203,7 +246,10 @@ BOT_TOKEN=${BOT_TOKEN}
 ADMIN_IDS=${ADMIN_IDS}
 SUPPORT_CHAT_ID=${SUPPORT_CHAT_ID}
 
-# ===== 3X-UI =====
+# ===== Бэкенд панели: xui | marzban =====
+PANEL_BACKEND=${PANEL_BACKEND}
+
+# ===== 3X-UI (используется, если PANEL_BACKEND=xui) =====
 XUI_BASE_URL=${XUI_BASE_URL}
 XUI_AUTH=${XUI_AUTH}
 XUI_API_TOKEN=${XUI_API_TOKEN}
@@ -211,7 +257,16 @@ XUI_USERNAME=${XUI_USERNAME:-}
 XUI_PASSWORD=${XUI_PASSWORD:-}
 XUI_2FA_SECRET=${XUI_2FA_SECRET:-}
 
-# ===== Подписка =====
+# ===== Marzban (используется, если PANEL_BACKEND=marzban) =====
+MARZBAN_URL=${MARZBAN_URL:-}
+MARZBAN_USERNAME=${MARZBAN_USERNAME:-}
+MARZBAN_PASSWORD=${MARZBAN_PASSWORD:-}
+MARZBAN_RESET_STRATEGY=${MARZBAN_RESET_STRATEGY:-month}
+MARZBAN_PROXIES=${MARZBAN_PROXIES:-}
+MARZBAN_INBOUNDS=${MARZBAN_INBOUNDS:-}
+
+# ===== Подписка (используется, если PANEL_BACKEND=xui — Marzban отдаёт
+# subscription_url сам, шаблон ему не нужен) =====
 PLAN_DAYS=${PLAN_DAYS}
 PLAN_TRAFFIC_GB=150
 DEFAULT_INBOUND_IDS=1
@@ -284,9 +339,20 @@ check_var() {
 }
 check_var BOT_TOKEN
 check_var ADMIN_IDS
-check_var XUI_BASE_URL
-check_var XUI_API_TOKEN
-check_var SUB_URL_TEMPLATE
+
+# читаем PANEL_BACKEND из .env напрямую — при повторном запуске (SKIP_SETUP=1,
+# .env уже существует) блок настройки выше не выполнялся, шелл-переменная
+# $PANEL_BACKEND могла остаться пустой.
+ENV_PANEL_BACKEND=$(grep -E '^PANEL_BACKEND=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
+if [ "${ENV_PANEL_BACKEND:-xui}" = "marzban" ]; then
+    check_var MARZBAN_URL
+    check_var MARZBAN_USERNAME
+    check_var MARZBAN_PASSWORD
+else
+    check_var XUI_BASE_URL
+    check_var XUI_API_TOKEN
+    check_var SUB_URL_TEMPLATE
+fi
 
 if [ ${#MISSING[@]} -gt 0 ]; then
     warn "Не заполнены обязательные переменные:"
