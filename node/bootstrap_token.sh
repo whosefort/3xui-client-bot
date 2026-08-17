@@ -163,6 +163,14 @@ ufw default deny incoming >/dev/null; ufw default allow outgoing >/dev/null
 ufw --force enable >/dev/null
 ok "UFW включён."
 
+# ---------- 5.5. fail2ban ----------
+# SSH 22/tcp открыт всем — без fail2ban это голый root+password под открытым
+# интернетом. UFW тут не спасает, он про порты, не про частоту попыток.
+echo; ok "Ставлю fail2ban…"
+apt-get install -y fail2ban -qq >/dev/null 2>&1 && systemctl enable --now fail2ban >/dev/null 2>&1 \
+  && ok "fail2ban включён." \
+  || warn "fail2ban не встал — поставь руками (apt-get install fail2ban)."
+
 echo
 echo -e "${G}ГОТОВО.${NC}"
 echo "Нода id=$NODE_ID должна стать 'connected' в панели за ~10-30 сек."
