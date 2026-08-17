@@ -192,7 +192,13 @@ ok "marzban-node запущен."
 # образе. См. node/TROUBLESHOOTING.md.
 echo; ok "Обновляю xray-core до актуальной версии (совместимость с клиентами)…"
 XRAY_TARGET_VER="${XRAY_VERSION:-}"
+XRAY_PIN_FILE="$(dirname "${BASH_SOURCE[0]:-$0}")/XRAY_VERSION"
+if [ -z "$XRAY_TARGET_VER" ] && [ -f "$XRAY_PIN_FILE" ]; then
+  XRAY_TARGET_VER="$(tr -d '[:space:]' < "$XRAY_PIN_FILE")"
+  ok "Использую зафиксированную версию из node/XRAY_VERSION: $XRAY_TARGET_VER"
+fi
 if [ -z "$XRAY_TARGET_VER" ]; then
+  warn "node/XRAY_VERSION не найден рядом со скриптом (запущен standalone-curl?) — беру GitHub latest."
   XRAY_TARGET_VER="$(curl -fsSL "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['tag_name'])" 2>/dev/null || true)"
 fi
@@ -249,6 +255,81 @@ else
   warn "Авто-регистрация не удалась (возможно, нода с таким адресом уже есть). Ответ: ${REG:0:200}"
   warn "Зарегистрируй руками в панели: Node Settings → Add Node → address=$PUBIP, port=$SERVICE_PORT, api_port=$XRAY_API_PORT."
 fi
+
+# ---------- 6. честная проверка туннеля ----------
+# "connected" в панели — это здоровье node-API (62050/62051), НЕ auth самого
+# REALITY-инбаунда. Создаём одноразового юзера, гоняем через него настоящий
+# аутентифицированный туннель прямо здесь, на ноде, и удаляем юзера. Ловит
+# сломанный/отсутствующий инбаунд, version skew и т.п. сразу при разворачивании,
+# а не через день жалоб от живых клиентов. См. TROUBLESHOOTING.md.
+echo; ok "Проверяю туннель по-настоящему (не просто 'connected')…"
+_write_curl_auth
+VERIFY_JSON="$(mktemp)"
+python3 - "$PANEL_URL" "$TOKEN" > "$VERIFY_JSON" <<'PY'
+import sys, urllib.request, json, secrets, uuid
+from urllib.parse import urlparse, parse_qsl
+base, token = sys.argv[1], sys.argv[2]
+ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+def api(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    req.add_header("User-Agent", ua); req.add_header("Authorization", "Bearer " + token)
+    if data is not None: req.add_header("Content-Type", "application/json")
+    r = urllib.request.urlopen(req, timeout=30); raw = r.read()
+    return json.loads(raw) if raw else {}
+cfg = api("GET", "/api/core/config")
+tags = [i["tag"] for i in cfg.get("inbounds", []) if i.get("streamSettings", {}).get("security") == "reality"]
+if not tags:
+    print(json.dumps({"skip": "no reality inbound configured yet"})); raise SystemExit(0)
+tag = tags[0]
+username = "verify-" + secrets.token_hex(4)
+client_id = str(uuid.uuid4())
+api("POST", "/api/user", {"username": username, "status": "active",
+    "proxies": {"vless": {"id": client_id, "flow": "xtls-rprx-vision"}},
+    "inbounds": {"vless": [tag]}})
+u = api("GET", f"/api/user/{username}")
+p = urlparse(u["links"][0]); q = dict(parse_qsl(p.query))
+print(json.dumps({"username": username, "uuid": p.username, "pbk": q.get("pbk"),
+    "sid": q.get("sid"), "sni": q.get("sni"), "fp": q.get("fp", "chrome")}))
+PY
+
+SKIP="$(python3 -c "import json;print(json.load(open('$VERIFY_JSON')).get('skip',''))")"
+if [ -n "$SKIP" ]; then
+  warn "Проверка пропущена: $SKIP"
+  warn "Опиши REALITY-инбаунд в панели (Core Config), потом прогони node/verify_node.sh."
+else
+  VUSER="$(python3 -c "import json;print(json.load(open('$VERIFY_JSON'))['username'])")"
+  VCFG="$(mktemp)"
+  python3 - "$VERIFY_JSON" "$PUBIP" > "$VCFG" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); node_ip = sys.argv[2]
+cfg = {"log": {"loglevel": "warning"},
+  "inbounds": [{"port": 19999, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
+  "outbounds": [{"protocol": "vless",
+    "settings": {"vnext": [{"address": node_ip, "port": 443, "users": [
+      {"id": d["uuid"], "encryption": "none", "flow": "xtls-rprx-vision"}]}]},
+    "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
+      "serverName": d["sni"], "fingerprint": d["fp"], "publicKey": d["pbk"],
+      "shortId": d["sid"], "spiderX": "/"}}}]}
+json.dump(cfg, open("/dev/stdout", "w"))
+PY
+  cp "$VCFG" /var/lib/marzban-node/verify_client.json
+  ( cd /opt/marzban-node && docker compose exec -d marzban-node xray run -config /var/lib/marzban-node/verify_client.json )
+  sleep 3
+  VRESULT="$(curl --socks5-hostname 127.0.0.1:19999 -s -o /dev/null -w '%{http_code}' --max-time 10 https://www.gstatic.com/generate_204 || true)"
+  VPID="$(ss -tlnp 2>/dev/null | grep '127.0.0.1:19999' | grep -oE 'pid=[0-9]+' | cut -d= -f2)"
+  [ -n "$VPID" ] && kill "$VPID" 2>/dev/null || true
+  rm -f /var/lib/marzban-node/verify_client.json "$VCFG"
+  _write_curl_auth
+  curl -fsSL -X DELETE "$PANEL_URL/api/user/$VUSER" --config "$CURL_AUTH_CONFIG" >/dev/null 2>&1 || true
+  if [ "$VRESULT" = "204" ]; then
+    ok "ТУННЕЛЬ ПРОВЕРЕН: реальный клиент прошёл REALITY-хендшейк и получил трафик."
+  else
+    warn "ТУННЕЛЬ НЕ ПРОШЁЛ (ответ: ${VRESULT:-нет ответа}). Нода connected, но клиенты работать НЕ будут."
+    warn "Смотри node/TROUBLESHOOTING.md — начни с версии xray-core."
+  fi
+fi
+rm -f "$VERIFY_JSON"
 
 echo
 echo -e "${G}ГОТОВО.${NC}"

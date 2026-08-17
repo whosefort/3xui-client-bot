@@ -2,6 +2,9 @@
 
 `bootstrap.sh` превращает свежий VPS в ноду Marzban и цепляет её к главной панели.
 
+Нода умерла и нужно развернуть новую с нуля? →
+[`DISASTER_RECOVERY.md`](./DISASTER_RECOVERY.md) — пошагово, без домыслов о контексте.
+
 ## Запуск (под root на чистом Ubuntu/Debian)
 ```bash
 PANEL_URL=https://mon.your-domain.tld bash bootstrap.sh
@@ -24,12 +27,16 @@ PANEL_URL=https://mon.your-domain.tld bash bootstrap.sh
 1. Ставит Docker.
 2. Тянет client-cert панели (`GET /api/node/settings`) → `/var/lib/marzban-node/ssl_client_cert.pem`.
 3. Поднимает `marzban-node` (docker, `network_mode: host`, protocol `rest`).
-4. Обновляет xray-core внутри контейнера до актуального тега XTLS (образ
-   marzban-node часто отстаёт от того, что используют клиентские приложения —
-   см. `TROUBLESHOOTING.md`).
+4. Ставит xray-core версии из `XRAY_VERSION` (зафиксированная, проверенная
+   живым клиентом — образ marzban-node сам по себе часто отстаёт от того, что
+   реально используют клиентские приложения, см. `TROUBLESHOOTING.md`).
 5. UFW: 443 всем, node-порты 62050/62051 — только с IP панели, SSH.
 6. Регистрирует ноду (`POST /api/node`, `add_as_new_host=true`) — адрес ноды сам
    попадает в Hosts инбаундов, ссылки клиентов поедут на неё.
+7. **Честно проверяет туннель** — создаёт одноразового юзера, гоняет через
+   него настоящий REALITY-хендшейк, удаляет юзера. Печатает явный вердикт:
+   ТУННЕЛЬ ПРОВЕРЕН или НЕ ПРОШЁЛ. "connected" в панели — это здоровье
+   node-API, не то же самое, что "клиент сможет подключиться".
 
 ## После
 - В панели нода станет `connected` за ~10–30 сек. Логи: `cd /opt/marzban-node && docker compose logs -f`.
@@ -37,13 +44,21 @@ PANEL_URL=https://mon.your-domain.tld bash bootstrap.sh
   служит то, что панель раскатает.
 - Клиент не подключается / "не пингуется", хотя нода `connected`? →
   [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) — сначала проверить версию
-  xray-core (`upgrade_xray.sh`), это самая частая причина.
+  xray-core, это самая частая причина.
 
 ## Обслуживание
-- `upgrade_xray.sh` — подтянуть свежий xray-core на уже работающей ноде, без
-  полного bootstrap. Переживает `restart`/reboot, не переживает
-  `docker compose up --force-recreate` — гонять заново после пересоздания
-  контейнера.
+- `XRAY_VERSION` — зафиксированная версия xray-core, проверенная живым
+  клиентом. Обновляй осознанно: проверил новую версию — обновил файл.
+- `upgrade_xray.sh` — подтянуть версию из `XRAY_VERSION` (или `XRAY_VERSION=…`
+  из окружения) на уже работающей ноде, без полного bootstrap. Переживает
+  `restart`/reboot, не переживает `docker compose up --force-recreate` —
+  гонять заново после пересоздания контейнера.
+- `verify_node.sh` — честная проверка туннеля на уже развёрнутой ноде (то же,
+  что шаг 7 bootstrap, но отдельно и с любой машины по SSH). Гонять после
+  любых изменений REALITY-инбаунда в панели.
+- `check_xray_drift.py` — сверяет xray-core на всех нодах с `XRAY_VERSION`,
+  шлёт алерт в Telegram при регрессии (например, после пересоздания
+  контейнера). Ставь в cron раз в день — см. шапку файла.
 
 ## Безопасность
 - Главная панель — «мозг», трафик не возит. Ноды — «скот», возят трафик, IP расходный.

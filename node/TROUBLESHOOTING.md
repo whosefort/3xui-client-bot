@@ -40,18 +40,25 @@ docker exec marzban-node-marzban-node-1 xray version
 
 **Фикс:**
 ```bash
-# на самой ноде:
+# на самой ноде — подтянет версию из node/XRAY_VERSION (уже проверенную):
 bash node/upgrade_xray.sh
-# или руками конкретную версию:
-XRAY_VERSION=v26.7.11 bash node/upgrade_xray.sh
+# или руками конкретную версию, если проверяешь новую:
+XRAY_VERSION=v26.7.28 bash node/upgrade_xray.sh
 ```
 `bootstrap.sh` теперь делает это автоматически при первом разворачивании ноды
-(шаг 3.5) — но клиентские приложения обновляются быстрее, чем ты
-пересоздаёшь ноды, так что при новых жалобах на "не пингуется" сначала сюда.
+(шаг 3.5, тоже из `node/XRAY_VERSION`) — но клиентские приложения
+обновляются быстрее, чем ты пересоздаёшь ноды, так что при новых жалобах на
+"не пингуется" сначала сюда. `node/check_xray_drift.py` в кроне ловит это
+само, без ручной проверки — см. `README.md`.
 
 Патч живёт в writable layer контейнера: переживёт `restart`/reboot хоста, но
 **не** переживёт `docker compose up --force-recreate` или пересборку образа —
-после пересоздания контейнера гоняй `upgrade_xray.sh` заново.
+после пересоздания контейнера гоняй `upgrade_xray.sh` заново (или дождись
+`check_xray_drift.py`, если он в кроне — пришлёт алерт).
+
+Проверил новую версию с живым клиентом и она работает? Обнови
+`node/XRAY_VERSION` — это единственное место, откуда `bootstrap.sh`,
+`upgrade_xray.sh` и `check_xray_drift.py` берут "текущую правильную версию".
 
 ## #2. `listen: ""` (пустая строка) вместо `"0.0.0.0"`
 
@@ -118,11 +125,18 @@ docker exec marzban-marzban-1 sh -c "timeout 4 xray run -config /tmp/cfg.json 2>
 
 ## Как проверить туннель самому, не дожидаясь живого клиента
 
-Ручной аутентифицированный тест прямо с ноды, на её публичный IP (не
-loopback — иначе не поймаешь ни firewall, ни version-skew с реальным путём):
+Проще всего: `bash node/verify_node.sh` — делает ровно это автоматически
+(создаёт одноразового юзера через API панели, гоняет туннель, удаляет юзера,
+выводит вердикт). `bootstrap.sh` уже гоняет его на новых нодах сам.
+
+Ручной способ (если нужно руками/для отладки, без скрипта) — аутентифицированный
+тест прямо с ноды, на её публичный IP (не loopback — иначе не поймаешь ни
+firewall, ни version-skew с реальным путём):
 
 ```bash
-cat > /tmp/client.json <<'EOF'
+# /var/lib/marzban-node — единственный путь, замаунтенный И на хосте, И в
+# контейнере (docker-compose.yml). /tmp хоста контейнер не видит.
+cat > /var/lib/marzban-node/client.json <<'EOF'
 {"log":{"loglevel":"warning"},
  "inbounds":[{"port":10999,"listen":"127.0.0.1","protocol":"socks","settings":{"udp":true}}],
  "outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"<ПУБЛИЧНЫЙ_IP_НОДЫ>","port":443,
@@ -131,13 +145,28 @@ cat > /tmp/client.json <<'EOF'
      "serverName":"<SNI>","fingerprint":"chrome",
      "publicKey":"<PBK>","shortId":"<SID>","spiderX":"/"}}}]}
 EOF
-docker compose -f /opt/marzban-node/docker-compose.yml exec -d marzban-node xray run -config /tmp/client.json
+cd /opt/marzban-node
+docker compose exec -d marzban-node xray run -config /var/lib/marzban-node/client.json
 sleep 3
+# curl — С ХОСТА, не docker exec: в образе marzban-node нет curl/wget вообще.
+# network_mode: host расшаривает сеть, сокет виден и достижим напрямую.
 curl --socks5-hostname 127.0.0.1:10999 -s -o /dev/null -w "http=%{http_code}\n" --max-time 10 https://www.gstatic.com/generate_204
+# прибраться: не pkill (его тоже нет в образе) — найти PID по порту и убить точечно
+PID=$(ss -tlnp 2>/dev/null | grep '127.0.0.1:10999' | grep -oE 'pid=[0-9]+' | cut -d= -f2)
+[ -n "$PID" ] && kill "$PID"
+rm -f /var/lib/marzban-node/client.json
 ```
 `http=204` — сервер и авторизация в порядке, проблема дальше по пути (клиент,
 его сеть, DPI конкретно у клиента). Не 204 — проблема на самой ноде, копай
 #1/#2.
+
+**Осторожно:** в этом же контейнере всегда крутится СВОЙ основной xray
+(реально держит 443 для живых клиентов, cmdline `xray run -config stdin:`).
+`pkill xray`/`pkill -f xray` заденет и его — совпадает по имени процесса.
+В образе marzban-node `pkill` в любом случае нет (ранняя версия
+`verify_node.sh` полагалась на него, тихо проваливалась и копила зомби-
+процессы — не роняла прод только по счастливой случайности отсутствия
+самой команды). Только точечный `kill` по PID конкретного порта, как выше.
 
 **Важно:** тестируй с чужой машины (check-host.net, другой VPS), не со своего
 домашнего провайдера — многие бытовые провайдеры SYN-ACK'ают весь диапазон

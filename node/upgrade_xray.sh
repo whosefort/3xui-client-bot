@@ -30,8 +30,13 @@ CONTAINER="${CONTAINER:-marzban-node-marzban-node-1}"
 docker inspect "$CONTAINER" >/dev/null 2>&1 || die "Контейнер $CONTAINER не найден. Задай CONTAINER=имя, если у тебя другое (docker ps)."
 
 XRAY_VERSION="${XRAY_VERSION:-}"
+XRAY_PIN_FILE="$(dirname "${BASH_SOURCE[0]:-$0}")/XRAY_VERSION"
+if [ -z "$XRAY_VERSION" ] && [ -f "$XRAY_PIN_FILE" ]; then
+  XRAY_VERSION="$(tr -d '[:space:]' < "$XRAY_PIN_FILE")"
+  echo "Использую зафиксированную версию из node/XRAY_VERSION: $XRAY_VERSION"
+fi
 if [ -z "$XRAY_VERSION" ]; then
-  echo "Определяю последний тег XTLS/Xray-core (включая pre-release — именно на них живут клиенты)…"
+  echo "node/XRAY_VERSION не найден — беру последний тег XTLS/Xray-core с GitHub (включая pre-release)…"
   XRAY_VERSION="$(curl -fsSL "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['tag_name'])")"
 fi
