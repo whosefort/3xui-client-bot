@@ -207,7 +207,8 @@ async def _approve_new(req) -> None:
     created = await panel.create_client(
         tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
     db.upsert_user(tg_id, req["tg_username"], client_email=created.username, sub_id=created.sub_url)
-    await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.sub_url))
+    await _safe_user_msg(tg_id, texts.new_subscription_issued(
+        config.plan_days, created.sub_url, created.raw.get("links")))
 
 
 async def _approve_renew(req) -> None:
@@ -454,9 +455,12 @@ async def cb_cli_lnk(cb: CallbackQuery) -> None:
     if not cl:
         await cb.answer("Клиент не найден", show_alert=True)
         return
+    links = cl.raw.get("links") or []
+    links_block = ("\n\n🔗 Сырые ссылки (если у клиента таймаут на сабку — эти вставляются в клиент напрямую, без запроса к домену панели):\n"
+                  + "\n".join(f"<code>{html.escape(lk)}</code>" for lk in links)) if links else ""
     await cb.message.answer(
         f"🔗 Ссылка-подписка <b>{html.escape(_label(cl, db.usernames_map()))}</b>:\n"
-        f"<code>{cl.sub_url}</code>"
+        f"<code>{cl.sub_url}</code>{links_block}"
     )
     await cb.answer()
 
@@ -691,7 +695,7 @@ async def _do_grant(tg_id: int) -> str:
             tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
         db.upsert_user(tg_id, uname, client_email=created.username, sub_id=created.sub_url)
         await _safe_user_msg(tg_id, texts.new_subscription_issued(
-            config.plan_days, created.sub_url))
+            config.plan_days, created.sub_url, created.raw.get("links")))
         return f"✅ Создана подписка для {tg_id}"
     except Exception:  # noqa: BLE001
         log.exception("grant failed")

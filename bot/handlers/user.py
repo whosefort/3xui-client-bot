@@ -81,9 +81,9 @@ async def cb_status(cb: CallbackQuery) -> None:
         # а VPN не работает (ровно та путаница, ради которой делался бот).
         text = texts.status_exhausted()
     elif days is None:
-        text = texts.status_unlimited(cl.sub_url)
+        text = texts.status_unlimited(cl.sub_url, cl.raw.get("links"))
     else:
-        text = texts.status_active(days, cl.sub_url)
+        text = texts.status_active(days, cl.sub_url, cl.raw.get("links"))
     await cb.message.edit_text(text, reply_markup=main_menu(True))
     await cb.answer()
 

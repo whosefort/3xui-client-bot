@@ -4,19 +4,38 @@ from __future__ import annotations
 import html
 
 
-def status_active(days: int, sub_url: str) -> str:
+def _links_block(links: list[str] | None) -> str:
+    # Ссылка-подписка сама по себе — это URL, который клиент СКАЧИВАЕТ по HTTPS
+    # с домена панели. Если этот домен попал под DPI (типичный сценарий в РФ —
+    # блок по SNI, обычно первым бьёт по мобильным операторам), скачивание
+    # виснет и таймаутит, хотя сам VPN-туннель идёт напрямую на IP ноды и не
+    # затронут. Сырые ссылки ниже — это готовые конфиги, импортируются в
+    # клиент без единого запроса к домену панели, обходят этот класс проблем.
+    if not links:
+        return ""
+    lines = "\n".join(f"<code>{html.escape(lk)}</code>" for lk in links)
+    return (
+        f"\n\n⚠️ Если ссылка-подписка выше не грузится/зависает (частое дело "
+        f"с мобильного интернета в РФ) — вставьте эти ссылки в клиент напрямую, "
+        f"через «Добавить вручную» / «Add from clipboard»:\n{lines}"
+    )
+
+
+def status_active(days: int, sub_url: str, links: list[str] | None = None) -> str:
     return (
         f"✅ <b>Подписка активна</b>\n"
         f"Осталось дней: <b>{days}</b>\n\n"
         f"🔗 Ваша ссылка-подписка:\n<code>{sub_url}</code>\n\n"
         f"Добавьте её в приложение (v2RayTun / Hiddify / v2rayNG) — и всё заработает."
+        f"{_links_block(links)}"
     )
 
 
-def status_unlimited(sub_url: str) -> str:
+def status_unlimited(sub_url: str, links: list[str] | None = None) -> str:
     return (
         f"✅ <b>Подписка активна</b> (бессрочно)\n\n"
         f"🔗 Ваша ссылка-подписка:\n<code>{sub_url}</code>"
+        f"{_links_block(links)}"
     )
 
 
@@ -72,12 +91,13 @@ def reminder(days: int) -> str:
             f"Чтобы не прерываться, продлите заранее — кнопка «Продлить».")
 
 
-def new_subscription_issued(days: int, sub_url: str) -> str:
+def new_subscription_issued(days: int, sub_url: str, links: list[str] | None = None) -> str:
     return (
         f"🎉 <b>Готово! Подписка на {days} дней активна.</b>\n\n"
         f"🔗 Ваша ссылка-подписка:\n<code>{sub_url}</code>\n\n"
         f"Откройте приложение (v2RayTun / Hiddify), импортируйте ссылку — и пользуйтесь. "
         f"Если что-то не подключается — кнопка «Связаться»."
+        f"{_links_block(links)}"
     )
 
 
