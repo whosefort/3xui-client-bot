@@ -86,14 +86,19 @@ def build_app() -> web.Application:
     return app
 
 
-def _build_ssl_context() -> ssl.SSLContext | None:
+def _build_ssl_context() -> ssl.SSLContext:
+    """Fail closed: этот эндпоинт отдаёт cert_pem новой ноды — долгоживущий
+    mTLS-кред, не токен с TTL. Без TLS сюда никак нельзя пускать трафик,
+    поэтому при отсутствии сертификата падаем со стартом бота целиком, а не
+    тихо поднимаем порт голым HTTP (раньше было именно так — легко было не
+    заметить log.error и словить реальную утечку через CF Flexible SSL)."""
     if not (os.path.isfile(_CERT_FILE) and os.path.isfile(_KEY_FILE)):
-        log.error(
-            "Нет %s/%s (см. MARZBAN_CERT_DIR в docker-compose.yml) — подниму порт "
-            "%d голым HTTP. За Cloudflare это скорее всего 525 (origin без TLS).",
-            _CERT_FILE, _KEY_FILE, config.node_provision_port,
+        raise RuntimeError(
+            f"NODE_PROVISION_ENABLED=true, но нет {_CERT_FILE}/{_KEY_FILE} "
+            f"(см. MARZBAN_CERT_DIR в docker-compose.yml) — отдавать cert_pem ноды "
+            f"голым HTTP нельзя, отказываюсь стартовать. Либо почини монтирование "
+            f"сертификата, либо выключи NODE_PROVISION_ENABLED."
         )
-        return None
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(_CERT_FILE, _KEY_FILE)
     return ctx
@@ -105,6 +110,6 @@ async def start(app: web.Application) -> web.AppRunner:
     ssl_ctx = _build_ssl_context()
     site = web.TCPSite(runner, "0.0.0.0", config.node_provision_port, ssl_context=ssl_ctx)
     await site.start()
-    log.info("HTTP-эндпоинт провижининга нод слушает :%d (tls=%s)",
-             config.node_provision_port, bool(ssl_ctx))
+    log.info("HTTP-эндпоинт провижининга нод слушает :%d (tls=on)",
+             config.node_provision_port)
     return runner

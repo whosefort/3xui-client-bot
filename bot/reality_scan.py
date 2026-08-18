@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import stat
+import uuid
 
 import aiohttp
 
@@ -96,7 +97,10 @@ async def scan(target: str, *, thread: int = 50, timeout_s: int = 8, max_results
     _validate_target(target)
     binary = await _ensure_binary()
 
-    out_csv = f"{_BIN_DIR}/out-{os.getpid()}-{abs(hash(target))}.csv"
+    # uuid4, не hash(target)+pid — оба детерминированы в рамках процесса,
+    # два параллельных скана ОДНОЙ цели получили бы один и тот же путь и
+    # гонялись бы за один файл (запись/чтение/удаление вперемешку).
+    out_csv = f"{_BIN_DIR}/out-{uuid.uuid4().hex}.csv"
     args = [
         binary, "-addr", target, "-port", "443",
         "-thread", str(thread), "-timeout", str(timeout_s), "-out", out_csv,

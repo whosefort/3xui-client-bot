@@ -22,7 +22,7 @@ from cryptography.hazmat.primitives.serialization import (Encoding, NoEncryption
                                                             PrivateFormat, PublicFormat)
 
 from .config import config
-from .node_provision import _UA, _marzban_auth
+from .node_provision import _UA, _marzban_auth, config_lock
 
 _DEFAULT_PORT = 443
 
@@ -72,7 +72,7 @@ async def set_sni(domain: str, port: int = _DEFAULT_PORT) -> None:
     per-host override sni в null для всех хостов этого инбаунда — иначе
     хосты с явно выставленным старым sni (см. Hosts API) продолжат отдавать
     клиентам старое значение в обход нового дефолта инбаунда."""
-    async with aiohttp.ClientSession() as s:
+    async with config_lock, aiohttp.ClientSession() as s:
         token = await _marzban_auth(s)
         headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
 
@@ -111,7 +111,7 @@ async def set_host_sni(tag: str, index: int, domain: str | None) -> None:
     domain=None — сброс на общий дефолт инбаунда (serverNames[0]).
     Если domain не входит в текущий serverNames — молча добавляет его туда
     (не заменяет остальные, только дописывает)."""
-    async with aiohttp.ClientSession() as s:
+    async with config_lock, aiohttp.ClientSession() as s:
         token = await _marzban_auth(s)
         headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
 
@@ -145,7 +145,7 @@ async def regenerate_keys() -> str:
     priv_b64 = urlsafe_b64encode(priv_raw).rstrip(b"=").decode()
     pub_b64 = urlsafe_b64encode(pub_raw).rstrip(b"=").decode()
 
-    async with aiohttp.ClientSession() as s:
+    async with config_lock, aiohttp.ClientSession() as s:
         token = await _marzban_auth(s)
         headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
         cfg = await _get_config(s, headers)
@@ -158,7 +158,7 @@ async def regenerate_keys() -> str:
 
 async def regenerate_short_ids(count: int = 8) -> list[str]:
     ids = [secrets.token_hex(4) for _ in range(count)]  # 8 hex-символов каждый
-    async with aiohttp.ClientSession() as s:
+    async with config_lock, aiohttp.ClientSession() as s:
         token = await _marzban_auth(s)
         headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
         cfg = await _get_config(s, headers)

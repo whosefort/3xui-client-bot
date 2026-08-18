@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 
@@ -18,6 +19,14 @@ log = logging.getLogger("node_provision")
 _UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 _SERVICE_PORT = 62050
 _XRAY_API_PORT = 62051
+
+# Общий на весь модуль + bot/reality_admin.py лок вокруг ЛЮБОЙ мутации
+# /api/core/config или /api/hosts. Обе — не CRUD, а bulk GET-целиком →
+# правим в памяти → PUT-целиком-обратно; Marzban не даёт ни ETag, ни
+# версионирования. Без лока два параллельных admin-действия (два админа в
+# ADMIN_IDS, или просто быстрый двойной тап) могут тихо затереть результат
+# друг друга — molчаливый lost update, не ошибка.
+config_lock = asyncio.Lock()
 
 
 class ProvisionError(Exception):
@@ -123,7 +132,7 @@ async def list_servers() -> list[dict]:
 async def rename_server(tag: str, index: int, remark: str) -> None:
     """Меняет remark одного хоста — bulk-эндпоинт, поэтому тянем всю
     структуру /api/hosts, правим один элемент и кладём обратно целиком."""
-    async with aiohttp.ClientSession() as s:
+    async with config_lock, aiohttp.ClientSession() as s:
         token = await _marzban_auth(s)
         headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
         async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
