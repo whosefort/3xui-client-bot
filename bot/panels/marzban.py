@@ -221,6 +221,15 @@ class MarzbanClient(PanelClient):
                             json_body={"status": "active" if enabled else "disabled"})
         self._invalidate()
 
+    async def set_unlimited(self, *, client: Client, reset_traffic: bool = True) -> Client:
+        u = await self._request("PUT", f"/api/user/{client.username}",
+                                json_body={"expire": 0, "data_limit": 0, "status": "active"})
+        if reset_traffic:
+            await self._request("POST", f"/api/user/{client.username}/reset")
+            u = await self._request("GET", f"/api/user/{client.username}") or u
+        self._invalidate()
+        return self._to_client(u)
+
     async def delete_client(self, username: str) -> None:
         await self._request("DELETE", f"/api/user/{username}")
         self._invalidate()

@@ -79,6 +79,12 @@ class PanelClient(ABC):
     async def set_enabled(self, *, client: Client, enabled: bool) -> None: ...
 
     @abstractmethod
+    async def set_unlimited(self, *, client: Client, reset_traffic: bool = True) -> Client:
+        """Снять ограничения совсем: бессрочно (expire=0) + безлимитный
+        трафик (limit=0). Отдельно от extend_client — та работает только
+        относительными сдвигами (add_days), явного «сделать бессрочным» нет."""
+
+    @abstractmethod
     async def delete_client(self, username: str) -> None: ...
 
     @abstractmethod

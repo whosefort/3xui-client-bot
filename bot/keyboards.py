@@ -95,15 +95,25 @@ def client_card_kb(email: str, enabled: bool) -> InlineKeyboardMarkup:
     kb.button(text="🔗 Ссылка", callback_data=f"cli:lnk:{email}")
     kb.button(text="✉️ Написать", callback_data=f"cli:msg:{email}")
     kb.button(text="🆔 Привязать tg_id", callback_data=f"cli:bind:{email}")
+    kb.button(text="✏️ Подпись", callback_data=f"cli:label:{email}")
+    kb.button(text="♾ Без ограничений", callback_data=f"cli:unlim:{email}")
     kb.button(text="🗑 Удалить", callback_data=f"cli:del:{email}")
     kb.button(text="↩️ К списку", callback_data="cli:list")
-    kb.adjust(2, 2, 2, 2, 1)
+    kb.adjust(2, 2, 2, 2, 1, 1)
     return kb.as_markup()
 
 
 def confirm_delete_kb(email: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🗑 Да, удалить", callback_data=f"cli:delok:{email}")
+    kb.button(text="↩️ Отмена", callback_data=f"cli:open:{email}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def confirm_unlimited_kb(email: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="♾ Да, без ограничений", callback_data=f"cli:unlimok:{email}")
     kb.button(text="↩️ Отмена", callback_data=f"cli:open:{email}")
     kb.adjust(1)
     return kb.as_markup()

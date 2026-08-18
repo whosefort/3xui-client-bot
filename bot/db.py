@@ -63,6 +63,17 @@ def init(db_path: str) -> None:
             PRIMARY KEY (tg_id, expiry_date, days_before)
         );
 
+        -- Ручная подпись клиента в списках/карточках бота — на случай, когда
+        -- клиента выдали вручную и он никогда не писал боту (Marzban/3x-ui не
+        -- знают Telegram-юзернеймы вообще, только наш username=u{tg_id}).
+        -- Ключ — username в панели (работает и для клиентов без tg_id).
+        CREATE TABLE IF NOT EXISTS client_labels (
+            client_username TEXT PRIMARY KEY,
+            label           TEXT NOT NULL,
+            set_by          INTEGER NOT NULL,
+            set_at          INTEGER NOT NULL
+        );
+
         -- Одноразовые токены для авторазвёртывания ноды («Добавить сервер»):
         -- бот регистрирует ноду в Marzban и тянет её cert сам, отдаёт токен —
         -- новый VPS забирает cert по токену, пароль от панели никуда не летит.
@@ -210,6 +221,32 @@ def mark_reminded(tg_id: int, expiry_date: str, days_before: int) -> None:
             (tg_id, expiry_date, days_before, int(time.time())),
         )
         _c().commit()
+
+
+# ---------- client_labels (ручная подпись клиента) ----------
+
+def set_client_label(client_username: str, label: str, set_by: int) -> None:
+    with _lock:
+        _c().execute(
+            "INSERT INTO client_labels(client_username,label,set_by,set_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(client_username) DO UPDATE SET label=excluded.label, "
+            "set_by=excluded.set_by, set_at=excluded.set_at",
+            (client_username, label, set_by, int(time.time())),
+        )
+        _c().commit()
+
+
+def clear_client_label(client_username: str) -> None:
+    with _lock:
+        _c().execute("DELETE FROM client_labels WHERE client_username=?", (client_username,))
+        _c().commit()
+
+
+def client_labels_map() -> dict[str, str]:
+    """username в панели -> подпись, для всех клиентов у кого она задана."""
+    with _lock:
+        rows = _c().execute("SELECT client_username, label FROM client_labels").fetchall()
+    return {r["client_username"]: r["label"] for r in rows}
 
 
 # ---------- node_tokens (авторазвёртывание нод) ----------

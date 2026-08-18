@@ -230,6 +230,19 @@ class XUIClient(PanelClient):
                             json_body=body)
         self._invalidate()
 
+    async def set_unlimited(self, *, client: Client, reset_traffic: bool = True) -> Client:
+        raw = dict(client.raw)
+        body = self._writable(raw)
+        body["expiryTime"] = 0
+        body["totalGB"] = 0
+        body["enable"] = True
+        await self._request("POST", f"/panel/api/clients/update/{quote(client.username, safe='')}",
+                            json_body=body)
+        self._invalidate()
+        if reset_traffic:
+            await self._reset_inbounds(client.username, raw.get("inboundIds") or self.inbound_ids)
+        return await self.find_by_username(client.username) or self._to_client({**raw, **body})
+
     async def delete_client(self, username: str) -> None:
         await self._request("POST", f"/panel/api/clients/del/{quote(username, safe='')}")
         self._invalidate()

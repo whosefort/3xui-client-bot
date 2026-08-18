@@ -22,7 +22,7 @@ from .. import db, keyboards as kb, node_provision, texts
 from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
-                         confirm_delete_kb, settings_kb)
+                         confirm_delete_kb, confirm_unlimited_kb, settings_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
 from .common import get_traffic_gb
@@ -48,12 +48,17 @@ class AdminFSM(StatesGroup):
     set_req = State()
     set_traffic = State()        # ждём новый месячный лимит трафика (ГБ)
     add_server = State()         # ждём "IP [имя]" новой ноды
+    card_label = State()         # ждём текст ручной подписи клиента
 
 
 # ---------- форматирование ----------
 
-def _label(cl: Client, umap: dict[int, str]) -> str:
-    """Человекочитаемое имя клиента: @username → id → username."""
+def _label(cl: Client, umap: dict[int, str], labels: dict[str, str] | None = None) -> str:
+    """Человекочитаемое имя клиента: ручная подпись → @username → id → username.
+    Ручная подпись всегда в приоритете — админ мог назвать клиента осознанно
+    иначе, чем показывает Telegram (или это клиент без tg_id вообще)."""
+    if labels and labels.get(cl.username):
+        return labels[cl.username]
     if cl.tg_id and umap.get(cl.tg_id):
         return umap[cl.tg_id]
     if cl.tg_id:
@@ -79,7 +84,7 @@ def _usage(cl: Client) -> str:
     return _fmt_bytes(used)
 
 
-def _card_text(cl: Client, umap: dict[int, str]) -> str:
+def _card_text(cl: Client, umap: dict[int, str], labels: dict[str, str] | None = None) -> str:
     days = cl.days_left
     if days is None:
         status = "♾ бессрочно"
@@ -90,7 +95,7 @@ def _card_text(cl: Client, umap: dict[int, str]) -> str:
     else:
         status = f"✅ активна, осталось <b>{days}</b> дн."
 
-    lines = [f"👤 <b>{html.escape(_label(cl, umap))}</b>"]
+    lines = [f"👤 <b>{html.escape(_label(cl, umap, labels))}</b>"]
     if cl.tg_id:
         lines.append(f"tg_id: <code>{cl.tg_id}</code>")
     lines.append(f"логин: <code>{html.escape(cl.username)}</code>")
@@ -251,11 +256,12 @@ async def kb_expiring(message: Message, state: FSMContext) -> None:
 async def _list_text_markup():
     panel = get_panel()
     umap = db.usernames_map()
+    labels = db.client_labels_map()
     clients = await panel.list_clients()
 
     def sort_key(cl):
         d = cl.days_left
-        return (10**9 if d is None else d, _label(cl, umap).lower())
+        return (10**9 if d is None else d, _label(cl, umap, labels).lower())
 
     clients.sort(key=sort_key)
     items = []
@@ -263,7 +269,7 @@ async def _list_text_markup():
         days = cl.days_left
         d = "♾" if days is None else f"{days}д"
         off = "" if (days is None or days > 0) and cl.enabled else "⛔️"
-        label = f"{off}{_label(cl, umap)} · {d}".strip()
+        label = f"{off}{_label(cl, umap, labels)} · {d}".strip()
         items.append((cl.username, label))
 
     text = f"👥 <b>Клиенты ({len(items)})</b>\nНажмите на клиента для управления:"
@@ -296,8 +302,9 @@ async def _show_card(cb: CallbackQuery, email: str) -> None:
         await cb.answer("Клиент не найден (возможно, удалён)", show_alert=True)
         return
     umap = db.usernames_map()
+    labels = db.client_labels_map()
     await cb.message.edit_text(
-        _card_text(cl, umap),
+        _card_text(cl, umap, labels),
         reply_markup=client_card_kb(email, cl.enabled),
     )
 
@@ -533,6 +540,73 @@ async def card_bind_input(message: Message, state: FSMContext) -> None:
     await message.answer(f"✅ Привязан tg_id <code>{tg_id}</code> к <code>{html.escape(email)}</code>.")
     await _safe_user_msg(tg_id, "🔗 Администратор привязал вашу подписку к этому чату. "
                                 "Нажмите /start и «📊 Моя подписка».")
+
+
+@router.callback_query(F.data.startswith("cli:label:"))
+async def cb_cli_label(cb: CallbackQuery, state: FSMContext) -> None:
+    email = cb.data.split(":", 2)[2]
+    cl = await get_panel().find_by_username(email)
+    if not cl:
+        await cb.answer("Клиент не найден", show_alert=True)
+        return
+    await state.set_state(AdminFSM.card_label)
+    await state.update_data(label_email=email)
+    current = db.client_labels_map().get(email)
+    hint = f"\nСейчас: «{html.escape(current)}»." if current else ""
+    await cb.message.answer(
+        f"✏️ Пришли подпись для <code>{html.escape(email)}</code> — как показывать "
+        f"его в списках/карточке (например имя клиента). Пустое сообщение (пробел) "
+        f"убирает подпись, возвращает автоопределение.{hint}\nОтмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.card_label, F.text)
+async def card_label_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    email = data.get("label_email")
+    text = (message.text or "").strip()
+    if not email:
+        return
+    if not text:
+        db.clear_client_label(email)
+        await message.answer(f"✅ Подпись для <code>{html.escape(email)}</code> убрана.")
+        return
+    db.set_client_label(email, text, message.from_user.id)
+    await message.answer(f"✅ <code>{html.escape(email)}</code> теперь подписан как «{html.escape(text)}».")
+
+
+@router.callback_query(F.data.startswith("cli:unlim:"))
+async def cb_cli_unlim(cb: CallbackQuery) -> None:
+    email = cb.data.split(":", 2)[2]
+    await cb.message.edit_text(
+        f"♾ Снять ВСЕ ограничения с <code>{html.escape(email)}</code>?\n"
+        f"Бессрочно + безлимитный трафик, счётчик трафика сбросится. "
+        f"Обычные «Продлить» после этого снова введут срок/лимит.",
+        reply_markup=confirm_unlimited_kb(email),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("cli:unlimok:"))
+async def cb_cli_unlimok(cb: CallbackQuery) -> None:
+    email = cb.data.split(":", 2)[2]
+    panel = get_panel()
+    cl = await panel.find_by_username(email)
+    if not cl:
+        await cb.answer("Клиент не найден", show_alert=True)
+        return
+    try:
+        await panel.set_unlimited(client=cl, reset_traffic=True)
+    except Exception:  # noqa: BLE001
+        log.exception("set_unlimited failed")
+        await cb.answer("❌ Ошибка панели — не удалось. См. логи.", show_alert=True)
+        return
+    if cl.tg_id:
+        await _safe_user_msg(cl.tg_id, "🎉 Ваша подписка теперь без ограничений по сроку и трафику.")
+    await _show_card(cb, email)
+    await cb.answer("Готово — без ограничений.")
 
 
 @router.callback_query(F.data.startswith("cli:del:"))
