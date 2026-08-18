@@ -115,6 +115,7 @@ async def list_servers() -> list[dict]:
                 "tag": tag, "index": i,
                 "remark": h.get("remark") or "",
                 "address": h.get("address") or "",
+                "sni": h.get("sni") or "",
             })
     return out
 

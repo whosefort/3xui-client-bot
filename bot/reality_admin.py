@@ -102,6 +102,40 @@ async def set_sni(domain: str, port: int = _DEFAULT_PORT) -> None:
                     )
 
 
+async def set_host_sni(tag: str, index: int, domain: str | None) -> None:
+    """SNI для ОДНОГО хоста (нода+инбаунд), не для всего кластера. Это не
+    настоящая изоляция — ядро xray у всех нод общее и технически примет
+    handshake с ЛЮБЫМ доменом из serverNames, не только со «своим». Но раз
+    конкретная нода в ссылках всегда светит только один домен, от пассивного
+    SNI-фингерпринтинга (не от целевого пробинга именно этой ноды) помогает.
+    domain=None — сброс на общий дефолт инбаунда (serverNames[0]).
+    Если domain не входит в текущий serverNames — молча добавляет его туда
+    (не заменяет остальные, только дописывает)."""
+    async with aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+
+        if domain:
+            cfg = await _get_config(s, headers)
+            rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
+            if domain not in rs.get("serverNames", []):
+                rs.setdefault("serverNames", []).append(domain)
+                await _put_config(s, headers, cfg)
+
+        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
+            hosts = await r.json(content_type=None)
+            if r.status >= 400:
+                raise RealityError(f"не смог получить хосты ({r.status}): {hosts}")
+        entries = hosts.get(tag)
+        if not entries or index >= len(entries):
+            raise RealityError(f"хост {tag}[{index}] не найден — список хостов изменился")
+        entries[index]["sni"] = domain
+        async with s.put(f"{config.marzban_url}/api/hosts", json=hosts, headers=headers) as r:
+            res = await r.json(content_type=None)
+            if r.status >= 400:
+                raise RealityError(f"не смог сохранить sni хоста ({r.status}): {res}")
+
+
 async def regenerate_keys() -> str:
     """Новая X25519-пара в формате xray REALITY (raw 32 байта, base64
     urlsafe без паддинга). Возвращает новый publicKey (безопасно показать)."""

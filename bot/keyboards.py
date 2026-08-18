@@ -165,6 +165,8 @@ def servers_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 def server_card_kb(key: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✏️ Переименовать", callback_data=f"srv:rename:{key}")
+    kb.button(text="🎭 Свой SNI для этой ноды", callback_data=f"srv:sni:{key}")
+    kb.button(text="♻️ Сбросить SNI (общий)", callback_data=f"srv:snireset:{key}")
     kb.button(text="↩️ К списку", callback_data="srv:list")
     kb.adjust(1)
     return kb.as_markup()

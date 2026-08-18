@@ -53,6 +53,7 @@ class AdminFSM(StatesGroup):
     card_label = State()         # ждём текст ручной подписи клиента
     card_note = State()          # ждём текст описания клиента (для админа)
     rename_server = State()      # ждём новое имя сервера (remark хоста)
+    server_sni = State()         # ждём домен для персонального SNI одной ноды
     reality_sni = State()        # ждём домен для смены SNI
     reality_scan = State()       # ждём цель (IP/CIDR/домен) для скана RealiTLScanner
 
@@ -1181,10 +1182,13 @@ async def cb_srv_open(cb: CallbackQuery) -> None:
     if not match:
         await cb.answer("Сервер не найден (список изменился)", show_alert=True)
         return
+    sni_line = f"SNI: <code>{html.escape(match['sni'])}</code> (свой)" if match["sni"] \
+        else "SNI: общий дефолт кластера"
     await cb.message.edit_text(
         f"🖥 <b>{html.escape(_server_label(match))}</b>\n"
         f"Адрес: <code>{html.escape(match['address'])}</code>\n"
-        f"Инбаунд: <code>{html.escape(tag)}</code>",
+        f"Инбаунд: <code>{html.escape(tag)}</code>\n"
+        f"{sni_line}",
         reply_markup=server_card_kb(key),
     )
     await cb.answer()
@@ -1223,6 +1227,71 @@ async def rename_server_input(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Ошибка при обращении к панели. См. логи.")
         return
     await message.answer(f"✅ Сервер теперь называется «{html.escape(text)}».")
+
+
+@router.callback_query(F.data.startswith("srv:sni:"))
+async def cb_srv_sni(cb: CallbackQuery, state: FSMContext) -> None:
+    key = cb.data.split(":", 2)[2]
+    await state.set_state(AdminFSM.server_sni)
+    await state.update_data(sni_key=key)
+    await cb.message.answer(
+        "🎭 Пришли домен-камуфляж только для ЭТОЙ ноды (например "
+        "<code>www.speedtest.net</code>). Проверю TLS1.3/серт перед применением.\n\n"
+        "⚠️ Это не полная изоляция: ядро xray у всех нод общее и технически "
+        "примет и другие SNI из общего списка — но клиенты именно этой ноды "
+        "в ссылках увидят только выбранный домен.\n"
+        "Отмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.server_sni, F.text)
+async def server_sni_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    key = data.get("sni_key")
+    domain = (message.text or "").strip().lower()
+    if not key or not domain or " " in domain or "/" in domain:
+        await state.clear()
+        await message.answer("Не похоже на домен. Отменено.")
+        return
+    await message.answer(f"Проверяю {html.escape(domain)}…")
+    result = await reality_admin.check_sni_candidate(domain)
+    if not result["ok"]:
+        await state.clear()
+        await message.answer(
+            f"❌ <code>{html.escape(domain)}</code> не прошёл проверку: "
+            f"{html.escape(result['reason'])}. Отменено — попробуй другой домен."
+        )
+        return
+    await state.clear()
+    tag, _, idx = key.partition(":")
+    try:
+        await reality_admin.set_host_sni(tag, int(idx), domain)
+    except reality_admin.RealityError as e:
+        await message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("server_sni_input: set_host_sni failed")
+        await message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    await message.answer(f"✅ Эта нода теперь светит SNI <code>{html.escape(domain)}</code>.")
+
+
+@router.callback_query(F.data.startswith("srv:snireset:"))
+async def cb_srv_snireset(cb: CallbackQuery) -> None:
+    key = cb.data.split(":", 2)[2]
+    tag, _, idx = key.partition(":")
+    try:
+        await reality_admin.set_host_sni(tag, int(idx), None)
+    except reality_admin.RealityError as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("cb_srv_snireset failed")
+        await cb.answer("Ошибка при обращении к панели", show_alert=True)
+        return
+    await cb.answer("SNI сброшен на общий дефолт")
+    await cb.message.answer("♻️ SNI этой ноды сброшен на общий дефолт кластера.")
 
 
 # =====================================================================
