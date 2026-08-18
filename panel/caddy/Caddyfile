@@ -1,0 +1,53 @@
+# Caddy — единственный процесс на публичном 443 мастера. Termирует TLS для
+# обоих доменов панели, реверс-проксирует в Marzban (127.0.0.1:8001, см.
+# ../README.md — Marzban больше не биндит публичный порт напрямую).
+#
+# Деплой: scp этот файл в /etc/caddy/Caddyfile на сервере, systemctl reload caddy.
+# Подставь свои домены вместо logs-storage17.com.
+
+{
+	# Оба домена используют СВОИ явные сертификаты (CF Origin для mon., честный
+	# Let's Encrypt для sub.) — автоматическое управление сертификатами Caddy не
+	# нужно и мешает: даже при explicit tls Caddy всё равно вешает свой ACME
+	# HTTP-01 solver на /.well-known/acme-challenge/* для ЛЮБОГО домена из site
+	# blocks, перехватывая запрос ДО пользовательских handle{} (видно в логах
+	# как "no information found to solve challenge" — это Caddy сам себе мешает,
+	# не баг в handle-блоке). certbot renew --webroot из-за этого висел на
+	# рандомной задержке и потом получал 404. auto_https off убирает solver и
+	# автоматический http->https редирект — редиректы ниже прописаны вручную.
+	auto_https off
+}
+
+http://mon.logs-storage17.com {
+	redir https://{host}{uri} permanent
+}
+
+mon.logs-storage17.com {
+	# Дашборд/API — через Cloudflare (orange cloud), тот же серт, что и
+	# раньше был у самого Marzban (Cloudflare Origin CA — доверяют только
+	# запросы, реально прошедшие через CF, для sub. ниже он не подходит).
+	tls /var/lib/marzban/certs/fullchain.pem /var/lib/marzban/certs/key.pem
+	reverse_proxy 127.0.0.1:8001
+}
+
+http://sub.logs-storage17.com {
+	# ACME HTTP-01 challenge для продления (certbot --webroot, не --standalone —
+	# тот конфликтует с Caddy за порт 80). Голый HTTP, без редиректа. Certbot
+	# сам создаёт вложенный путь <root>/.well-known/acme-challenge/<token> —
+	# не путать с корнем root, туда файл руками не кладётся.
+	handle /.well-known/acme-challenge/* {
+		root * /var/www/acme-challenge
+		file_server
+	}
+	handle {
+		redir https://{host}{uri} permanent
+	}
+}
+
+sub.logs-storage17.com {
+	# Только выдача подписки — DNS-only (серое облако) в Cloudflare, честный
+	# Let's Encrypt сертификат (см. ../README.md про установку через certbot
+	# + ACL, здесь Caddy просто ЧИТАЕТ готовые файлы, сам не заказывает).
+	tls /etc/letsencrypt/live/sub.logs-storage17.com/fullchain.pem /etc/letsencrypt/live/sub.logs-storage17.com/privkey.pem
+	reverse_proxy 127.0.0.1:8001
+}
