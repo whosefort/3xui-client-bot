@@ -47,10 +47,20 @@ REG_ADDR="$(jget address < "$CLAIM_JSON")"
 PANEL_IP="$(jget panel_ip < "$CLAIM_JSON")"
 XRAY_TARGET_VER="$(jget xray_version < "$CLAIM_JSON")"
 NODE_IMAGE_PINNED="$(jget node_image < "$CLAIM_JSON")"
+BOT_SSH_PUBKEY="$(jget bot_ssh_pubkey < "$CLAIM_JSON")"
 python3 -c "import sys,json; print(json.load(open('$CLAIM_JSON')).get('cert_pem',''))" > /tmp/_claimed_cert.pem
 [ -s /tmp/_claimed_cert.pem ] || die "Пустой cert от бота."
 head -1 /tmp/_claimed_cert.pem | grep -q "BEGIN CERT" || die "cert от бота не похож на PEM."
 ok "Нода id=$NODE_ID уже зарегистрирована в панели (address=$REG_ADDR)."
+
+# Ключ бота — только для удалённого node/upgrade_xray.sh («Обновить xray на
+# нодах» в админке), больше ничего им не делается.
+if [ -n "$BOT_SSH_PUBKEY" ]; then
+  mkdir -p /root/.ssh && chmod 700 /root/.ssh
+  touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+  grep -qxF "$BOT_SSH_PUBKEY" /root/.ssh/authorized_keys || echo "$BOT_SSH_PUBKEY" >> /root/.ssh/authorized_keys
+  ok "SSH-ключ бота добавлен в authorized_keys (для удалённого апгрейда xray-core)."
+fi
 
 python3 -c "import ipaddress; ipaddress.ip_address('$PANEL_IP')" 2>/dev/null \
   || die "Бот вернул некорректный panel_ip ($PANEL_IP) — баг на стороне бота."

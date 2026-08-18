@@ -43,6 +43,21 @@ INBOUND_PORTS="${INBOUND_PORTS:-443 8443}"
 [ -n "$PANEL_URL" ]  || read -rp "URL главной панели (https://mon.домен): " PANEL_URL
 [ -n "$PANEL_USER" ] || read -rp "Логин админа панели: " PANEL_USER
 [ -n "$PANEL_PASS" ] || { read -rsp "Пароль админа панели: " PANEL_PASS; echo; }
+
+# Ключ бота для удалённого апгрейда xray-core («🔄 Обновить xray на нодах»
+# в админке) — опционально, только если хочешь эту кнопку и для этой ноды.
+# Публичный ключ бот один раз сгенерировал сам (bot/ssh_ops.py), достать —
+# спросить у бота, например через /console или из data/node_ssh_ed25519.pub
+# на сервере, где стоит бот.
+if [ -t 0 ] && [ -z "${BOT_SSH_PUBKEY:-}" ]; then
+  read -rp "Публичный SSH-ключ бота (Enter — пропустить, добавишь потом руками): " BOT_SSH_PUBKEY
+fi
+if [ -n "${BOT_SSH_PUBKEY:-}" ]; then
+  mkdir -p /root/.ssh && chmod 700 /root/.ssh
+  touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+  grep -qxF "$BOT_SSH_PUBKEY" /root/.ssh/authorized_keys || echo "$BOT_SSH_PUBKEY" >> /root/.ssh/authorized_keys
+  ok "SSH-ключ бота добавлен в authorized_keys."
+fi
 PANEL_URL="${PANEL_URL%/}"
 
 # ---------- публичный IP ----------

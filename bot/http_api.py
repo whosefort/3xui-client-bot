@@ -16,7 +16,7 @@ import ssl
 
 from aiohttp import web
 
-from . import db
+from . import db, ssh_ops
 from .config import config
 
 log = logging.getLogger("http_api")
@@ -72,6 +72,7 @@ async def _claim(request: web.Request) -> web.Response:
         "panel_ip": row["panel_ip"],
         "xray_version": _read_xray_version(),
         "node_image": _read_node_image(),
+        "bot_ssh_pubkey": ssh_ops.ensure_keypair(),
     })
 
 

@@ -157,7 +157,16 @@ def servers_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for key, label in items:
         kb.button(text=label, callback_data=f"srv:open:{key}")
+    kb.button(text="🔄 Обновить xray на всех нодах", callback_data="srv:xrayup")
     kb.button(text="✖️ Закрыть", callback_data="srv:close")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def xray_upgrade_confirm_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Обновить все ноды", callback_data="srv:xrayupgo")
+    kb.button(text="✖️ Отмена", callback_data="srv:list")
     kb.adjust(1)
     return kb.as_markup()
 

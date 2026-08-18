@@ -18,13 +18,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from .. import db, keyboards as kb, node_provision, reality_admin, reality_scan, texts
+from .. import db, keyboards as kb, node_provision, reality_admin, reality_scan, ssh_ops, texts
 from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
                          confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
                          reality_menu_kb, reality_scan_results_kb, reality_sni_result_kb,
-                         server_card_kb, settings_kb, sub_fallback_kb)
+                         server_card_kb, settings_kb, sub_fallback_kb, xray_upgrade_confirm_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
 from .common import get_traffic_gb
@@ -1292,6 +1292,61 @@ async def cb_srv_snireset(cb: CallbackQuery) -> None:
         return
     await cb.answer("SNI сброшен на общий дефолт")
     await cb.message.answer("♻️ SNI этой ноды сброшен на общий дефолт кластера.")
+
+
+def _xray_pin() -> str:
+    import os
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "node", "XRAY_VERSION")
+    with open(os.path.normpath(path)) as f:
+        return f.read().strip()
+
+
+@router.callback_query(F.data == "srv:xrayup")
+async def cb_srv_xrayup(cb: CallbackQuery) -> None:
+    try:
+        pin = _xray_pin()
+    except OSError:
+        await cb.answer("node/XRAY_VERSION не найден", show_alert=True)
+        return
+    await cb.message.answer(
+        f"🔄 Обновить xray-core до <code>{html.escape(pin)}</code> (пин из node/XRAY_VERSION) "
+        f"на ВСЕХ подключённых нодах по SSH? Ядро на каждой ноде перезапустится — "
+        f"клиенты на ней разорвут соединение на пару секунд.",
+        reply_markup=xray_upgrade_confirm_kb(),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "srv:xrayupgo")
+async def cb_srv_xrayupgo(cb: CallbackQuery) -> None:
+    await cb.answer()
+    try:
+        pin = _xray_pin()
+    except OSError:
+        await cb.message.answer("❌ node/XRAY_VERSION не найден.")
+        return
+    try:
+        nodes = await node_provision.list_nodes()
+    except node_provision.ProvisionError as e:
+        await cb.message.answer(f"❌ Не смог получить список нод: {e}")
+        return
+    if not nodes:
+        await cb.message.answer("Нод нет.")
+        return
+
+    await cb.message.answer(f"Обновляю {len(nodes)} нод(ы) до {html.escape(pin)}…")
+    lines = []
+    for n in nodes:
+        name, address = n.get("name", "?"), n.get("address", "")
+        try:
+            await ssh_ops.upgrade_node(address, pin)
+            lines.append(f"✅ {html.escape(name)} ({html.escape(address)})")
+        except ssh_ops.SSHOpError as e:
+            lines.append(f"❌ {html.escape(name)} ({html.escape(address)}): {html.escape(str(e))}")
+        except Exception:  # noqa: BLE001
+            log.exception("xray upgrade failed for node %s", name)
+            lines.append(f"❌ {html.escape(name)} ({html.escape(address)}): см. логи бота")
+    await cb.message.answer("Готово:\n" + "\n".join(lines))
 
 
 # =====================================================================

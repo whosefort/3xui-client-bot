@@ -4,6 +4,8 @@ apscheduler==3.10.4
 python-dotenv==1.0.1
 # X25519 keypair generation для перегенерации REALITY-ключей (bot/reality_admin.py).
 cryptography>=42,<45
+# SSH к нодам — bot/ssh_ops.py, только для запуска node/upgrade_xray.sh.
+asyncssh>=2.14,<3
 # Бэкап в R2 (S3-совместимое). boto3 — обязателен для загрузки.
 # pyrage (age-шифрование) ставится отдельно в Dockerfile как best-effort,
 # чтобы отсутствие wheel под арх не валило сборку всего образа.

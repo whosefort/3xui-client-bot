@@ -102,6 +102,19 @@ def new_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+async def list_nodes() -> list[dict]:
+    """Реальные ноды из /api/nodes (не хосты-в-подписке — здесь address —
+    настоящий IP ноды, куда бот будет ходить по SSH)."""
+    async with aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        async with s.get(f"{config.marzban_url}/api/nodes", headers=headers) as r:
+            data = await r.json(content_type=None)
+            if r.status >= 400:
+                raise ProvisionError(f"не смог получить список нод ({r.status}): {data}")
+            return data
+
+
 async def list_servers() -> list[dict]:
     """Плоский список хостов из /api/hosts — то, что реально видит клиент в
     своём приложении (remark = имя сервера в списке). Один узел (нода) обычно
