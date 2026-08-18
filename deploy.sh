@@ -160,12 +160,95 @@ if [ "${SKIP_SETUP:-0}" -eq 0 ]; then
         echo ""
         echo "  Стратегия сброса трафика клиента: month | no_reset."
         ask_optional MARZBAN_RESET_STRATEGY "MARZBAN_RESET_STRATEGY" "month"
+
         echo ""
-        echo "  Продвинутое (Enter — пропустить, бот сам возьмёт ВСЕ инбаунды панели):"
-        echo "  JSON proxies, например {\"vless\":{\"flow\":\"xtls-rprx-vision\"}}"
-        ask_optional MARZBAN_PROXIES "MARZBAN_PROXIES (Enter — пропустить)"
-        echo "  JSON inbounds, например {\"vless\":[\"VLESS REALITY\"]}"
-        ask_optional MARZBAN_INBOUNDS "MARZBAN_INBOUNDS (Enter — пропустить)"
+        echo -e "  ${BOLD}── Какие инбаунды получают НОВЫХ клиентов ────────────${NC}"
+        echo "  Спрашиваю у панели список инбаундов, чтобы не гадать вслепую —"
+        echo "  оставить пустым (Enter вместо номеров) означает ВСЕ инбаунды панели,"
+        echo "  включая шаблонный мусор вроде неиспользуемого Shadowsocks."
+        # Живой запрос к панели: список инбаундов -> интерактивный выбор номеров ->
+        # готовые MARZBAN_PROXIES/MARZBAN_INBOUNDS. Меню и вопрос — в stderr, чтобы
+        # $(...) поймал только два финальных JSON на stdout.
+        INBOUND_PICK_OUT="$(python3 - "$MARZBAN_URL" "$MARZBAN_USERNAME" "$MARZBAN_PASSWORD" <<'PY'
+import json, sys, urllib.error, urllib.parse, urllib.request
+
+
+def eprint(*a):
+    print(*a, file=sys.stderr)
+
+
+base, user, pw = sys.argv[1], sys.argv[2], sys.argv[3]
+ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+
+
+def op(req):
+    req.add_header("User-Agent", ua)
+    return urllib.request.urlopen(req, timeout=15)
+
+
+try:
+    d = urllib.parse.urlencode({"username": user, "password": pw}).encode()
+    tok = json.load(op(urllib.request.Request(base + "/api/admin/token", data=d, method="POST"))).get("access_token")
+    if not tok:
+        eprint("AUTH_FAILED")
+        sys.exit(2)
+    rq = urllib.request.Request(base + "/api/inbounds")
+    rq.add_header("Authorization", "Bearer " + tok)
+    data = json.load(op(rq))
+except Exception as e:  # noqa: BLE001
+    eprint(f"FETCH_FAILED: {e}")
+    sys.exit(2)
+
+pairs = []
+eprint("  Найденные инбаунды:")
+for proto, items in data.items():
+    for it in items:
+        pairs.append((proto, it["tag"]))
+        eprint(f"    {len(pairs)}) {proto} / {it['tag']}")
+
+if not pairs:
+    eprint("  Панель не вернула ни одного инбаунда — сначала опиши REALITY-инбаунд")
+    eprint("  в самой панели (Core Config), потом перезапусти deploy.sh.")
+    sys.exit(3)
+
+eprint("")
+sel = input("  Номера через запятую (обычно только REALITY), Enter — взять все: ").strip()
+
+if sel:
+    try:
+        idxs = [int(x.strip()) for x in sel.split(",") if x.strip()]
+        chosen = [pairs[i - 1] for i in idxs if 1 <= i <= len(pairs)]
+        if not chosen:
+            raise ValueError
+    except (ValueError, IndexError):
+        eprint("  Не разобрал номера — беру все инбаунды.")
+        chosen = pairs
+else:
+    chosen = pairs
+
+proxies, inbounds = {}, {}
+for proto, tag in chosen:
+    inbounds.setdefault(proto, []).append(tag)
+    if proto not in proxies:
+        proxies[proto] = {"flow": "xtls-rprx-vision"} if proto == "vless" else {}
+
+print(json.dumps(proxies))
+print(json.dumps(inbounds))
+PY
+)"
+        INBOUND_PICK_STATUS=$?
+        if [ "$INBOUND_PICK_STATUS" -eq 0 ]; then
+            MARZBAN_PROXIES="$(echo "$INBOUND_PICK_OUT" | sed -n 1p)"
+            MARZBAN_INBOUNDS="$(echo "$INBOUND_PICK_OUT" | sed -n 2p)"
+            ok "Настроено: proxies=$MARZBAN_PROXIES"
+            ok "           inbounds=$MARZBAN_INBOUNDS"
+        else
+            warn "Не смог достучаться до панели за списком инбаундов — впиши JSON руками."
+            echo "  JSON proxies, например {\"vless\":{\"flow\":\"xtls-rprx-vision\"}}"
+            ask_optional MARZBAN_PROXIES "MARZBAN_PROXIES" "{\"vless\":{\"flow\":\"xtls-rprx-vision\"}}"
+            echo "  JSON inbounds, например {\"vless\":[\"VLESS REALITY\"]}"
+            ask_optional MARZBAN_INBOUNDS "MARZBAN_INBOUNDS" "{\"vless\":[\"VLESS REALITY\"]}"
+        fi
     else
         # ── 3X-UI ─────────────────────────────────────────────────────────────────
         echo -e "  ${BOLD}── 3X-UI панель ──────────────────────────────────────${NC}"
