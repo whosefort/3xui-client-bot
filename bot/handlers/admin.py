@@ -22,8 +22,8 @@ from .. import db, keyboards as kb, node_provision, texts
 from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
-                         confirm_delete_kb, confirm_unlimited_kb, settings_kb,
-                         sub_fallback_kb)
+                         confirm_delete_kb, confirm_unlimited_kb, server_card_kb,
+                         settings_kb, sub_fallback_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
 from .common import get_traffic_gb
@@ -50,6 +50,8 @@ class AdminFSM(StatesGroup):
     set_traffic = State()        # ждём новый месячный лимит трафика (ГБ)
     add_server = State()         # ждём "IP [имя]" новой ноды
     card_label = State()         # ждём текст ручной подписи клиента
+    card_note = State()          # ждём текст описания клиента (для админа)
+    rename_server = State()      # ждём новое имя сервера (remark хоста)
 
 
 # ---------- форматирование ----------
@@ -85,7 +87,8 @@ def _usage(cl: Client) -> str:
     return _fmt_bytes(used)
 
 
-def _card_text(cl: Client, umap: dict[int, str], labels: dict[str, str] | None = None) -> str:
+def _card_text(cl: Client, umap: dict[int, str], labels: dict[str, str] | None = None,
+                note: str | None = None) -> str:
     days = cl.days_left
     if days is None:
         status = "♾ бессрочно"
@@ -104,6 +107,8 @@ def _card_text(cl: Client, umap: dict[int, str], labels: dict[str, str] | None =
     usage = _usage(cl)
     if usage:
         lines.append(f"Трафик: {usage}")
+    if note:
+        lines.append(f"📝 {html.escape(note)}")
     return "\n".join(lines)
 
 
@@ -120,7 +125,7 @@ async def adm_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "🛠 <b>Админ-панель</b>\nВыберите действие на клавиатуре ниже.",
-        reply_markup=admin_kb(_add_server_available()),
+        reply_markup=admin_kb(_add_server_available(), _servers_available()),
     )
 
 
@@ -133,7 +138,7 @@ async def cmd_help(message: Message) -> None:
         "/requisites &lt;текст&gt; — реквизиты\n"
         "/grant &lt;tg_id&gt; — выдать вручную\n"
         "/broadcast &lt;текст&gt; — рассылка\n",
-        reply_markup=admin_kb(_add_server_available()),
+        reply_markup=admin_kb(_add_server_available(), _servers_available()),
     )
 
 
@@ -305,8 +310,9 @@ async def _show_card(cb: CallbackQuery, email: str) -> None:
         return
     umap = db.usernames_map()
     labels = db.client_labels_map()
+    note = db.get_client_note(email)
     await cb.message.edit_text(
-        _card_text(cl, umap, labels),
+        _card_text(cl, umap, labels, note),
         reply_markup=client_card_kb(email, cl.enabled),
     )
 
@@ -580,6 +586,41 @@ async def card_label_input(message: Message, state: FSMContext) -> None:
         return
     db.set_client_label(email, text, message.from_user.id)
     await message.answer(f"✅ <code>{html.escape(email)}</code> теперь подписан как «{html.escape(text)}».")
+
+
+@router.callback_query(F.data.startswith("cli:note:"))
+async def cb_cli_note(cb: CallbackQuery, state: FSMContext) -> None:
+    email = cb.data.split(":", 2)[2]
+    cl = await get_panel().find_by_username(email)
+    if not cl:
+        await cb.answer("Клиент не найден", show_alert=True)
+        return
+    await state.set_state(AdminFSM.card_note)
+    await state.update_data(note_email=email)
+    current = db.get_client_note(email)
+    hint = f"\nСейчас: «{html.escape(current)}»." if current else ""
+    await cb.message.answer(
+        f"📝 Пришли описание для <code>{html.escape(email)}</code> — заметка только "
+        f"для тебя, клиенту нигде не показывается. Пустое сообщение (пробел) убирает "
+        f"описание.{hint}\nОтмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.card_note, F.text)
+async def card_note_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    email = data.get("note_email")
+    text = (message.text or "").strip()
+    if not email:
+        return
+    if not text:
+        db.clear_client_note(email)
+        await message.answer(f"✅ Описание для <code>{html.escape(email)}</code> убрано.")
+        return
+    db.set_client_note(email, text, message.from_user.id)
+    await message.answer(f"✅ Описание для <code>{html.escape(email)}</code> сохранено.")
 
 
 @router.callback_query(F.data.startswith("cli:unlim:"))
@@ -1055,6 +1096,119 @@ async def add_server_input(message: Message, state: FSMContext) -> None:
         f"Вставь эту команду в SSH-сессию нового VPS (под root):\n\n"
         f"<code>{html.escape(cmd)}</code>"
     )
+
+
+# =====================================================================
+#  СЕРВЕРЫ (переименование того, что видит клиент в приложении)
+# =====================================================================
+
+def _servers_available() -> bool:
+    return config.panel_backend == "marzban"
+
+
+def _server_label(s: dict) -> str:
+    return s["remark"] or s["address"] or f"{s['tag']}[{s['index']}]"
+
+
+@router.message(F.text == kb.ADM_SERVERS)
+async def kb_servers(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if not _servers_available():
+        await message.answer("Недоступно: нужен PANEL_BACKEND=marzban.")
+        return
+    try:
+        servers = await node_provision.list_servers()
+    except node_provision.ProvisionError as e:
+        await message.answer(f"❌ Не удалось получить список: {e}")
+        return
+    if not servers:
+        await message.answer("Серверов пока нет.")
+        return
+    items = [(f"{s['tag']}:{s['index']}", _server_label(s)) for s in servers]
+    await message.answer(
+        f"🌍 Серверов: <b>{len(servers)}</b>\n"
+        f"Имя в списке — то, что клиент видит в своём VPN-приложении.",
+        reply_markup=kb.servers_list_kb(items),
+    )
+
+
+@router.callback_query(F.data == "srv:close")
+async def cb_srv_close(cb: CallbackQuery) -> None:
+    await cb.message.delete()
+    await cb.answer()
+
+
+@router.callback_query(F.data == "srv:list")
+async def cb_srv_list(cb: CallbackQuery) -> None:
+    try:
+        servers = await node_provision.list_servers()
+    except node_provision.ProvisionError as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    items = [(f"{s['tag']}:{s['index']}", _server_label(s)) for s in servers]
+    await cb.message.edit_text(
+        f"🌍 Серверов: <b>{len(servers)}</b>\n"
+        f"Имя в списке — то, что клиент видит в своём VPN-приложении.",
+        reply_markup=kb.servers_list_kb(items),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("srv:open:"))
+async def cb_srv_open(cb: CallbackQuery) -> None:
+    key = cb.data.split(":", 2)[2]
+    tag, _, idx = key.partition(":")
+    try:
+        servers = await node_provision.list_servers()
+    except node_provision.ProvisionError as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    match = next((s for s in servers if s["tag"] == tag and str(s["index"]) == idx), None)
+    if not match:
+        await cb.answer("Сервер не найден (список изменился)", show_alert=True)
+        return
+    await cb.message.edit_text(
+        f"🖥 <b>{html.escape(_server_label(match))}</b>\n"
+        f"Адрес: <code>{html.escape(match['address'])}</code>\n"
+        f"Инбаунд: <code>{html.escape(tag)}</code>",
+        reply_markup=server_card_kb(key),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("srv:rename:"))
+async def cb_srv_rename(cb: CallbackQuery, state: FSMContext) -> None:
+    key = cb.data.split(":", 2)[2]
+    await state.set_state(AdminFSM.rename_server)
+    await state.update_data(rename_key=key)
+    await cb.message.answer(
+        "✏️ Пришли новое имя сервера — так его увидит клиент в приложении, "
+        "например <code>Germany-1</code>. Без технических деталей.\n"
+        "Отмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.rename_server, F.text)
+async def rename_server_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    key = data.get("rename_key")
+    text = (message.text or "").strip()
+    if not key or not text:
+        await message.answer("Пусто. Отменено.")
+        return
+    tag, _, idx = key.partition(":")
+    try:
+        await node_provision.rename_server(tag, int(idx), text)
+    except node_provision.ProvisionError as e:
+        await message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("rename_server_input: rename_server failed")
+        await message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    await message.answer(f"✅ Сервер теперь называется «{html.escape(text)}».")
 
 
 # ---------- утилиты ----------

@@ -93,9 +93,10 @@ ADM_GRANT = "➕ Выдать вручную"
 ADM_SETTINGS = "💳 Цена/реквизиты"
 ADM_BROADCAST = "📢 Рассылка"
 ADM_ADD_SERVER = "🖥 Добавить сервер"
+ADM_SERVERS = "🌍 Серверы"
 
 
-def admin_kb(show_add_server: bool = False) -> ReplyKeyboardMarkup:
+def admin_kb(show_add_server: bool = False, show_servers: bool = False) -> ReplyKeyboardMarkup:
     """Постоянная клавиатура под полем ввода у админа."""
     kb = ReplyKeyboardBuilder()
     kb.button(text=ADM_REQUESTS)
@@ -105,9 +106,13 @@ def admin_kb(show_add_server: bool = False) -> ReplyKeyboardMarkup:
     kb.button(text=ADM_SETTINGS)
     kb.button(text=ADM_BROADCAST)
     rows = [2, 2, 2]
+    tail = int(show_servers) + int(show_add_server)
+    if show_servers:
+        kb.button(text=ADM_SERVERS)
     if show_add_server:
         kb.button(text=ADM_ADD_SERVER)
-        rows.append(1)
+    if tail:
+        rows.append(tail)
     kb.adjust(*rows)
     return kb.as_markup(resize_keyboard=True, is_persistent=True)
 
@@ -135,10 +140,29 @@ def client_card_kb(email: str, enabled: bool) -> InlineKeyboardMarkup:
     kb.button(text="✉️ Написать", callback_data=f"cli:msg:{email}")
     kb.button(text="🆔 Привязать tg_id", callback_data=f"cli:bind:{email}")
     kb.button(text="✏️ Подпись", callback_data=f"cli:label:{email}")
+    kb.button(text="📝 Описание", callback_data=f"cli:note:{email}")
     kb.button(text="♾ Без ограничений", callback_data=f"cli:unlim:{email}")
     kb.button(text="🗑 Удалить", callback_data=f"cli:del:{email}")
     kb.button(text="↩️ К списку", callback_data="cli:list")
-    kb.adjust(2, 2, 2, 2, 1, 1)
+    kb.adjust(2, 2, 2, 2, 1, 1, 1)
+    return kb.as_markup()
+
+
+def servers_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """items: [(server_key, подпись-кнопки), ...] — server_key = 'tag:index'."""
+    kb = InlineKeyboardBuilder()
+    for key, label in items:
+        kb.button(text=label, callback_data=f"srv:open:{key}")
+    kb.button(text="✖️ Закрыть", callback_data="srv:close")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def server_card_kb(key: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✏️ Переименовать", callback_data=f"srv:rename:{key}")
+    kb.button(text="↩️ К списку", callback_data="srv:list")
+    kb.adjust(1)
     return kb.as_markup()
 
 

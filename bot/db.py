@@ -74,6 +74,17 @@ def init(db_path: str) -> None:
             set_at          INTEGER NOT NULL
         );
 
+        -- note: свободное текстовое описание клиента для админа (не подпись,
+        -- не показывается клиенту нигде) — добавлено отдельной таблицей, а не
+        -- колонкой в client_labels: подпись обязательна там (NOT NULL), а
+        -- описание может стоять без подписи и наоборот.
+        CREATE TABLE IF NOT EXISTS client_notes (
+            client_username TEXT PRIMARY KEY,
+            note            TEXT NOT NULL,
+            set_by          INTEGER NOT NULL,
+            set_at          INTEGER NOT NULL
+        );
+
         -- Одноразовые токены для авторазвёртывания ноды («Добавить сервер»):
         -- бот регистрирует ноду в Marzban и тянет её cert сам, отдаёт токен —
         -- новый VPS забирает cert по токену, пароль от панели никуда не летит.
@@ -247,6 +258,33 @@ def client_labels_map() -> dict[str, str]:
     with _lock:
         rows = _c().execute("SELECT client_username, label FROM client_labels").fetchall()
     return {r["client_username"]: r["label"] for r in rows}
+
+
+# ---------- client_notes (описание клиента для админа) ----------
+
+def set_client_note(client_username: str, note: str, set_by: int) -> None:
+    with _lock:
+        _c().execute(
+            "INSERT INTO client_notes(client_username,note,set_by,set_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(client_username) DO UPDATE SET note=excluded.note, "
+            "set_by=excluded.set_by, set_at=excluded.set_at",
+            (client_username, note, set_by, int(time.time())),
+        )
+        _c().commit()
+
+
+def clear_client_note(client_username: str) -> None:
+    with _lock:
+        _c().execute("DELETE FROM client_notes WHERE client_username=?", (client_username,))
+        _c().commit()
+
+
+def get_client_note(client_username: str) -> Optional[str]:
+    with _lock:
+        row = _c().execute(
+            "SELECT note FROM client_notes WHERE client_username=?", (client_username,)
+        ).fetchone()
+    return row["note"] if row else None
 
 
 # ---------- node_tokens (авторазвёртывание нод) ----------

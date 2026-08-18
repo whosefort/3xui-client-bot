@@ -91,3 +91,51 @@ async def register_node(name: str, address: str) -> dict:
 
 def new_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+async def list_servers() -> list[dict]:
+    """Плоский список хостов из /api/hosts — то, что реально видит клиент в
+    своём приложении (remark = имя сервера в списке). Один узел (нода) обычно
+    даёт один host на инбаунд; при нескольких инбаундах на узле будет
+    несколько записей. {tag, index, remark, address} — tag+index достаточно,
+    чтобы однозначно адресовать запись в bulk-PUT /api/hosts (Marzban не даёт
+    отдельного id хосту)."""
+    async with aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
+            data = await r.json(content_type=None)
+            if r.status >= 400:
+                raise ProvisionError(f"не смог получить список хостов ({r.status}): {data}")
+
+    out = []
+    for tag, hosts in (data or {}).items():
+        for i, h in enumerate(hosts):
+            out.append({
+                "tag": tag, "index": i,
+                "remark": h.get("remark") or "",
+                "address": h.get("address") or "",
+            })
+    return out
+
+
+async def rename_server(tag: str, index: int, remark: str) -> None:
+    """Меняет remark одного хоста — bulk-эндпоинт, поэтому тянем всю
+    структуру /api/hosts, правим один элемент и кладём обратно целиком."""
+    async with aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
+            data = await r.json(content_type=None)
+            if r.status >= 400:
+                raise ProvisionError(f"не смог получить список хостов ({r.status}): {data}")
+
+        hosts = (data or {}).get(tag)
+        if not hosts or index >= len(hosts):
+            raise ProvisionError(f"хост {tag}[{index}] не найден — список хостов изменился")
+        hosts[index]["remark"] = remark
+
+        async with s.put(f"{config.marzban_url}/api/hosts", json=data, headers=headers) as r:
+            res = await r.json(content_type=None)
+            if r.status >= 400:
+                raise ProvisionError(f"не смог сохранить remark ({r.status}): {res}")
