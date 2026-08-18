@@ -18,6 +18,26 @@ def main_menu(has_sub: bool) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def status_kb() -> InlineKeyboardMarkup:
+    """Клавиатура под экраном статуса подписки (активная/бессрочная) —
+    добавляет troubleshooting-кнопку для не подгружающейся ссылки-подписки."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔁 Продлить", callback_data="renew")
+    kb.button(text="⚠️ Подписка не подгружается?", callback_data="sub_fallback")
+    kb.button(text="💬 Связаться", callback_data="support")
+    kb.button(text="↩️ В меню", callback_data="menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def sub_fallback_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к подписке", callback_data="status")
+    kb.button(text="💬 Связаться", callback_data="support")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def confirm_paid(kind: str) -> InlineKeyboardMarkup:
     # kind: buy | renew
     kb = InlineKeyboardBuilder()

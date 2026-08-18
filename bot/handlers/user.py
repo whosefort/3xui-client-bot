@@ -12,7 +12,7 @@ from aiogram.types import CallbackQuery, Message
 
 from .. import db, texts
 from ..config import config
-from ..keyboards import back_to_menu, confirm_paid, main_menu
+from ..keyboards import back_to_menu, confirm_paid, main_menu, status_kb, sub_fallback_kb
 from ..runtime import get_panel
 from .common import get_price, get_requisites, notify_admins, resolve_client
 
@@ -81,10 +81,21 @@ async def cb_status(cb: CallbackQuery) -> None:
         # а VPN не работает (ровно та путаница, ради которой делался бот).
         text = texts.status_exhausted()
     elif days is None:
-        text = texts.status_unlimited(cl.sub_url, cl.raw.get("links"))
+        text = texts.status_unlimited(cl.sub_url)
     else:
-        text = texts.status_active(days, cl.sub_url, cl.raw.get("links"))
-    await cb.message.edit_text(text, reply_markup=main_menu(True))
+        text = texts.status_active(days, cl.sub_url)
+    await cb.message.edit_text(text, reply_markup=status_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "sub_fallback")
+async def cb_sub_fallback(cb: CallbackQuery) -> None:
+    cl = await resolve_client(cb.from_user.id)
+    if not cl:
+        await cb.answer("Подписка не найдена", show_alert=True)
+        return
+    text = texts.sub_fallback(cl.raw.get("links"))
+    await cb.message.edit_text(text, reply_markup=sub_fallback_kb())
     await cb.answer()
 
 

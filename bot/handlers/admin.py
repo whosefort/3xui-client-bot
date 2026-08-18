@@ -22,7 +22,8 @@ from .. import db, keyboards as kb, node_provision, texts
 from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
-                         confirm_delete_kb, confirm_unlimited_kb, settings_kb)
+                         confirm_delete_kb, confirm_unlimited_kb, settings_kb,
+                         sub_fallback_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
 from .common import get_traffic_gb
@@ -207,8 +208,8 @@ async def _approve_new(req) -> None:
     created = await panel.create_client(
         tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
     db.upsert_user(tg_id, req["tg_username"], client_email=created.username, sub_id=created.sub_url)
-    await _safe_user_msg(tg_id, texts.new_subscription_issued(
-        config.plan_days, created.sub_url, created.raw.get("links")))
+    await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.sub_url),
+                         reply_markup=sub_fallback_kb())
 
 
 async def _approve_renew(req) -> None:
@@ -694,8 +695,8 @@ async def _do_grant(tg_id: int) -> str:
         created = await panel.create_client(
             tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
         db.upsert_user(tg_id, uname, client_email=created.username, sub_id=created.sub_url)
-        await _safe_user_msg(tg_id, texts.new_subscription_issued(
-            config.plan_days, created.sub_url, created.raw.get("links")))
+        await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.sub_url),
+                             reply_markup=sub_fallback_kb())
         return f"✅ Создана подписка для {tg_id}"
     except Exception:  # noqa: BLE001
         log.exception("grant failed")
@@ -1058,8 +1059,8 @@ async def add_server_input(message: Message, state: FSMContext) -> None:
 
 # ---------- утилиты ----------
 
-async def _safe_user_msg(tg_id: int, text: str) -> None:
+async def _safe_user_msg(tg_id: int, text: str, reply_markup=None) -> None:
     try:
-        await get_bot().send_message(tg_id, text)
+        await get_bot().send_message(tg_id, text, reply_markup=reply_markup)
     except Exception as e:  # noqa: BLE001
         log.warning("Не доставлено пользователю %s: %s", tg_id, e)
