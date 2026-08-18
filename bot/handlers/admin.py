@@ -1186,12 +1186,15 @@ async def cb_srv_open(cb: CallbackQuery) -> None:
         return
     sni_line = f"SNI: <code>{html.escape(match['sni'])}</code> (свой)" if match["sni"] \
         else "SNI: общий дефолт кластера"
+    frag_line = "Fragment: включён (обход DPI по сигнатуре ClientHello)" if match["fragment"] \
+        else "Fragment: выключен"
     await cb.message.edit_text(
         f"🖥 <b>{html.escape(_server_label(match))}</b>\n"
         f"Адрес: <code>{html.escape(match['address'])}</code>\n"
         f"Инбаунд: <code>{html.escape(tag)}</code>\n"
-        f"{sni_line}",
-        reply_markup=server_card_kb(key),
+        f"{sni_line}\n"
+        f"{frag_line}",
+        reply_markup=server_card_kb(key, fragment_on=match["fragment"]),
     )
     await cb.answer()
 
@@ -1376,6 +1379,44 @@ async def cb_srv_snireset(cb: CallbackQuery) -> None:
         return
     await cb.answer("SNI сброшен на общий дефолт")
     await cb.message.answer("♻️ SNI этой ноды сброшен на общий дефолт кластера.")
+
+
+@router.callback_query(F.data.startswith("srv:fragtoggle:"))
+async def cb_srv_fragtoggle(cb: CallbackQuery) -> None:
+    key = cb.data.split(":", 2)[2]
+    tag, _, idx = key.partition(":")
+    try:
+        servers = await node_provision.list_servers()
+    except node_provision.ProvisionError as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    match = next((s for s in servers if s["tag"] == tag and str(s["index"]) == idx), None)
+    if not match:
+        await cb.answer("Сервер не найден (список изменился)", show_alert=True)
+        return
+    new_state = not match["fragment"]
+    try:
+        await reality_admin.set_host_fragment(tag, int(idx), new_state)
+    except reality_admin.RealityError as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("cb_srv_fragtoggle failed")
+        await cb.answer("Ошибка при обращении к панели", show_alert=True)
+        return
+    await cb.answer("Fragment включён" if new_state else "Fragment выключен")
+    frag_line = "Fragment: включён (обход DPI по сигнатуре ClientHello)" if new_state \
+        else "Fragment: выключен"
+    sni_line = f"SNI: <code>{html.escape(match['sni'])}</code> (свой)" if match["sni"] \
+        else "SNI: общий дефолт кластера"
+    await cb.message.edit_text(
+        f"🖥 <b>{html.escape(_server_label(match))}</b>\n"
+        f"Адрес: <code>{html.escape(match['address'])}</code>\n"
+        f"Инбаунд: <code>{html.escape(tag)}</code>\n"
+        f"{sni_line}\n"
+        f"{frag_line}",
+        reply_markup=server_card_kb(key, fragment_on=new_state),
+    )
 
 
 def _xray_pin() -> str:

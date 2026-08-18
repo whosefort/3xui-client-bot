@@ -115,6 +115,36 @@ async def set_sni(domain: str, port: int = _DEFAULT_PORT) -> None:
                     )
 
 
+# Канонические значения из доки Marzban (валидаторы host-полей). fragment
+# режет TLS ClientHello на несколько TCP-сегментов на границе tlshello —
+# бьёт сигнатурный DPI, ловящий REALITY одним пакетом. noise хранится на
+# хосте на будущее, но реального эффекта СЕЙЧАС не даёт: Marzban кладёт
+# noise_setting только в JSON/singbox-конфиг, а не в обычную vless-ссылку,
+# которую разбирает Happ — в отличие от fragment (патч в panel/Dockerfile
+# чинит ветку reality, у которой апстрим его вообще не проверял).
+FRAGMENT_DEFAULT = "10-100,100-200,tlshello"
+NOISE_DEFAULT = "rand:10-20,100-200"
+
+
+async def set_host_fragment(tag: str, index: int, enabled: bool) -> None:
+    async with config_lock, aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
+            hosts = await r.json(content_type=None)
+            if r.status >= 400:
+                raise RealityError(f"не смог получить хосты ({r.status}): {hosts}")
+        entries = hosts.get(tag)
+        if not entries or index >= len(entries):
+            raise RealityError(f"хост {tag}[{index}] не найден — список хостов изменился")
+        entries[index]["fragment_setting"] = FRAGMENT_DEFAULT if enabled else None
+        entries[index]["noise_setting"] = NOISE_DEFAULT if enabled else None
+        async with s.put(f"{config.marzban_url}/api/hosts", json=hosts, headers=headers) as r:
+            res = await r.json(content_type=None)
+            if r.status >= 400:
+                raise RealityError(f"не смог сохранить fragment ({r.status}): {res}")
+
+
 async def set_host_sni(tag: str, index: int, domain: str | None) -> None:
     """SNI для ОДНОГО хоста (нода+инбаунд), не для всего кластера. Это не
     настоящая изоляция — ядро xray у всех нод общее и технически примет

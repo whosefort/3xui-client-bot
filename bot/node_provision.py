@@ -138,6 +138,7 @@ async def list_servers() -> list[dict]:
                 "remark": h.get("remark") or "",
                 "address": h.get("address") or "",
                 "sni": h.get("sni") or "",
+                "fragment": bool(h.get("fragment_setting")),
             })
     return out
 
