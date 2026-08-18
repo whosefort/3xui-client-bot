@@ -75,6 +75,12 @@ async def reminders_sweep() -> None:
 async def heartbeat() -> None:
     if not config.admin_ids:
         return
+    try:
+        purged = db.purge_old_node_tokens()
+        if purged:
+            log.info("Почистил %s использованных/истёкших node_tokens", purged)
+    except Exception:  # noqa: BLE001
+        log.exception("Чистка node_tokens упала")
     msg = "💚 Бот жив, напоминания работают."
     # Суточный бэкап привязан к отбивке: так он наблюдаем — каждый день видно,
     # что копия реально ушла в R2, и сразу заметно, если перестало.

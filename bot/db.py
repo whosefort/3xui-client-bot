@@ -314,3 +314,16 @@ def claim_node_token(token: str) -> Optional[sqlite3.Row]:
         _c().execute("UPDATE node_tokens SET used_at=? WHERE token=?", (now, token))
         _c().commit()
         return row
+
+
+def purge_old_node_tokens() -> int:
+    """Использованные (used_at не пусто) и истёкшие по TTL записи больше не
+    нужны — токен одноразовый, второй раз claim_node_token их всё равно не
+    отдаст. Просто чистка мусора в БД. Возвращает число удалённых строк."""
+    now = int(time.time())
+    with _lock:
+        cur = _c().execute(
+            "DELETE FROM node_tokens WHERE used_at IS NOT NULL OR expires_at < ?", (now,)
+        )
+        _c().commit()
+        return cur.rowcount
