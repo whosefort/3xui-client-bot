@@ -13,6 +13,25 @@ def main_menu(has_sub: bool) -> InlineKeyboardMarkup:
     else:
         kb.button(text="🛒 Купить подписку", callback_data="buy")
         kb.button(text="🔑 У меня уже есть подписка", callback_data="have_sub")
+    kb.button(text="❓ Частые вопросы", callback_data="faq")
+    kb.button(text="💬 Связаться", callback_data="support")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def faq_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """items: [(id, заголовок), ...] — оглавление FAQ."""
+    kb = InlineKeyboardBuilder()
+    for item_id, title in items:
+        kb.button(text=title, callback_data=f"faq:{item_id}")
+    kb.button(text="↩️ В меню", callback_data="menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def faq_answer_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ К вопросам", callback_data="faq")
     kb.button(text="💬 Связаться", callback_data="support")
     kb.adjust(1)
     return kb.as_markup()

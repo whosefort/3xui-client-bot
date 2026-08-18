@@ -12,7 +12,8 @@ from aiogram.types import CallbackQuery, Message
 
 from .. import db, texts
 from ..config import config
-from ..keyboards import back_to_menu, confirm_paid, main_menu, status_kb, sub_fallback_kb
+from ..keyboards import (back_to_menu, confirm_paid, faq_answer_kb, faq_kb,
+                        main_menu, status_kb, sub_fallback_kb)
 from ..runtime import get_panel
 from .common import get_price, get_requisites, notify_admins, resolve_client
 
@@ -85,6 +86,24 @@ async def cb_status(cb: CallbackQuery) -> None:
     else:
         text = texts.status_active(days, cl.sub_url)
     await cb.message.edit_text(text, reply_markup=status_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "faq")
+async def cb_faq(cb: CallbackQuery) -> None:
+    items = [(i, title) for i, title, _body in texts.FAQ_ITEMS]
+    await cb.message.edit_text(texts.faq_index(), reply_markup=faq_kb(items))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("faq:"))
+async def cb_faq_answer(cb: CallbackQuery) -> None:
+    item_id = cb.data.split(":", 1)[1]
+    body = texts.faq_answer(item_id)
+    if not body:
+        await cb.answer("Не нашёл такой вопрос", show_alert=True)
+        return
+    await cb.message.edit_text(body, reply_markup=faq_answer_kb())
     await cb.answer()
 
 
