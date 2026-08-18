@@ -162,12 +162,39 @@ head -1 /var/lib/marzban-node/ssl_client_cert.pem | grep -q "BEGIN CERT" \
 ok "Cert панели сохранён."
 
 # ---------- 3. marzban-node (docker) ----------
+# Образ marzban-node (не путать с xray-core внутри него, см. ниже): по
+# умолчанию берём зафиксированную версию из node/MARZBAN_NODE_IMAGE — так
+# новые ноды не ловят внезапный апгрейд самого marzban-node между бутстрапами.
+# NODE_IMAGE_CHANNEL=latest — осознанный опт-аут на :latest.
+NODE_IMAGE_CHANNEL="${NODE_IMAGE_CHANNEL:-}"
+if [ -t 0 ] && [ -z "$NODE_IMAGE_CHANNEL" ]; then
+  echo ""
+  echo "  Образ marzban-node:"
+  echo "    1) Стабильная, зафиксированная версия (рекомендуется)"
+  echo "    2) Последняя (:latest) — может принести неожиданный апгрейд"
+  read -rp "  Выбор [1]: " _img_choice
+  [ "${_img_choice:-1}" = "2" ] && NODE_IMAGE_CHANNEL="latest" || NODE_IMAGE_CHANNEL="stable"
+fi
+NODE_IMAGE_CHANNEL="${NODE_IMAGE_CHANNEL:-stable}"
+
+NODE_IMAGE="${NODE_IMAGE:-}"
+NODE_IMAGE_PIN_FILE="$(dirname "${BASH_SOURCE[0]:-$0}")/MARZBAN_NODE_IMAGE"
+if [ -z "$NODE_IMAGE" ] && [ "$NODE_IMAGE_CHANNEL" = "stable" ] && [ -f "$NODE_IMAGE_PIN_FILE" ]; then
+  NODE_IMAGE="$(tr -d '[:space:]' < "$NODE_IMAGE_PIN_FILE")"
+  ok "Образ marzban-node: зафиксированная версия ($NODE_IMAGE)"
+fi
+if [ -z "$NODE_IMAGE" ]; then
+  [ "$NODE_IMAGE_CHANNEL" = "stable" ] && warn "node/MARZBAN_NODE_IMAGE не найден рядом со скриптом — беру :latest."
+  NODE_IMAGE="gozargah/marzban-node:latest"
+  warn "Образ marzban-node: :latest — версия не зафиксирована, может измениться при следующем бутстрапе."
+fi
+
 echo; ok "Поднимаю marzban-node…"
 mkdir -p /opt/marzban-node
 cat > /opt/marzban-node/docker-compose.yml <<EOF
 services:
   marzban-node:
-    image: gozargah/marzban-node:latest
+    image: ${NODE_IMAGE}
     restart: always
     network_mode: host
     environment:

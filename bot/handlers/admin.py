@@ -1046,6 +1046,9 @@ async def kb_add_server(message: Message, state: FSMContext) -> None:
     await message.answer(
         "🖥 Пришли <b>публичный IP</b> новой ноды. Можно через пробел добавить имя:\n"
         "<code>203.0.113.10 eu-frankfurt-02</code>\n\n"
+        "По умолчанию образ marzban-node — зафиксированная стабильная версия. "
+        "Чтобы взять свежую :latest вместо неё, допиши <code>latest</code> третьим словом:\n"
+        "<code>203.0.113.10 eu-frankfurt-02 latest</code>\n\n"
         "VPS должен быть чистым (Ubuntu/Debian), root-доступ понадобится тебе — "
         "не мне и не боту, я его не спрашиваю."
     )
@@ -1054,12 +1057,17 @@ async def kb_add_server(message: Message, state: FSMContext) -> None:
 @router.message(AdminFSM.add_server, F.text)
 async def add_server_input(message: Message, state: FSMContext) -> None:
     await state.clear()
-    parts = (message.text or "").strip().split(maxsplit=1)
-    if not parts:
+    tokens = (message.text or "").strip().split()
+    if not tokens:
         await message.answer("Пусто. Отменено.")
         return
-    address = parts[0]
-    name = parts[1].strip() if len(parts) > 1 else address
+    address = tokens[0]
+    rest = tokens[1:]
+    image_channel = "stable"
+    if rest and rest[-1].lower() == "latest":
+        image_channel = "latest"
+        rest = rest[:-1]
+    name = " ".join(rest) if rest else address
     try:
         ipaddress.ip_address(address)
     except ValueError:
@@ -1086,13 +1094,16 @@ async def add_server_input(message: Message, state: FSMContext) -> None:
 
     claim_url = f"{config.marzban_url}:{config.node_provision_port}/nodeprovision/claim"
     ttl_min = config.node_token_ttl_seconds // 60
+    channel_env = " NODE_IMAGE_CHANNEL=latest" if image_channel == "latest" else ""
     cmd = (
         f"curl -fsSL https://raw.githubusercontent.com/whosefort/3xui-client-bot/main/"
-        f"node/bootstrap_token.sh | NODE_TOKEN={token} CLAIM_URL={claim_url} bash"
+        f"node/bootstrap_token.sh | NODE_TOKEN={token} CLAIM_URL={claim_url}{channel_env} bash"
     )
+    image_note = "образ marzban-node: :latest (выбрано вручную)" if image_channel == "latest" \
+        else "образ marzban-node: зафиксированная стабильная версия"
     await message.answer(
         f"✅ Нода id={reg['node_id']} зарегистрирована в панели ({address}).\n"
-        f"Токен живёт {ttl_min} мин, одноразовый.\n\n"
+        f"Токен живёт {ttl_min} мин, одноразовый. {image_note}.\n\n"
         f"Вставь эту команду в SSH-сессию нового VPS (под root):\n\n"
         f"<code>{html.escape(cmd)}</code>"
     )

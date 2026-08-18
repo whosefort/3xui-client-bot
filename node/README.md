@@ -66,6 +66,12 @@ PANEL_URL=https://mon.your-domain.tld bash bootstrap.sh
   xray-core, это самая частая причина.
 
 ## Обслуживание
+- `MARZBAN_NODE_IMAGE` — зафиксированный образ `gozargah/marzban-node` (тег +
+  digest). И `bootstrap.sh` (спросит интерактивно: стабильная/latest), и
+  `bootstrap_token.sh` (через бота, канал — `NODE_IMAGE_CHANNEL=latest` в
+  команде) по умолчанию берут именно его, а не вечно ползущий `:latest`.
+  Обновляй так же осознанно, как `XRAY_VERSION` ниже — проверил новую версию
+  на одной ноде, тогда обновил файл для всех следующих.
 - `XRAY_VERSION` — зафиксированная версия xray-core, проверенная живым
   клиентом. Обновляй осознанно: проверил новую версию — обновил файл.
 - `upgrade_xray.sh` — подтянуть версию из `XRAY_VERSION` (или `XRAY_VERSION=…`

@@ -14,9 +14,10 @@ RUN pip install --no-cache-dir "pyrage>=1.1,<2" \
     || echo "ВНИМАНИЕ: pyrage не установлен — бэкап будет без age-шифрования"
 
 COPY bot/ ./bot/
-# Только пин-файл версии xray-core (не весь node/) — «Добавить сервер» отдаёт
-# новым нодам ту же проверенную версию, что и node/bootstrap.sh на месте.
+# Только пин-файлы версий (не весь node/) — «Добавить сервер» отдаёт новым
+# нодам те же проверенные версии, что и node/bootstrap.sh на месте.
 COPY node/XRAY_VERSION ./node/XRAY_VERSION
+COPY node/MARZBAN_NODE_IMAGE ./node/MARZBAN_NODE_IMAGE
 
 # Непривилегированный пользователь (uid 10001). Контейнер не работает от root,
 # чтобы при компрометации зависимости минимизировать радиус поражения на host

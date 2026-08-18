@@ -46,6 +46,7 @@ NODE_ID="$(jget node_id < "$CLAIM_JSON")"
 REG_ADDR="$(jget address < "$CLAIM_JSON")"
 PANEL_IP="$(jget panel_ip < "$CLAIM_JSON")"
 XRAY_TARGET_VER="$(jget xray_version < "$CLAIM_JSON")"
+NODE_IMAGE_PINNED="$(jget node_image < "$CLAIM_JSON")"
 python3 -c "import sys,json; print(json.load(open('$CLAIM_JSON')).get('cert_pem',''))" > /tmp/_claimed_cert.pem
 [ -s /tmp/_claimed_cert.pem ] || die "Пустой cert от бота."
 head -1 /tmp/_claimed_cert.pem | grep -q "BEGIN CERT" || die "cert от бота не похож на PEM."
@@ -99,12 +100,27 @@ rm -f /tmp/_claimed_cert.pem
 ok "Cert панели сохранён."
 
 # ---------- 4. marzban-node (docker) ----------
+# Образ marzban-node: по умолчанию зафиксированная версия, которую бот отдал
+# в claim-ответе (node_image, читает node/MARZBAN_NODE_IMAGE — тот же паттерн,
+# что xray_version). Пайп через curl не умеет спрашивать интерактивно,
+# поэтому выбор канала — через env var в самой команде:
+#   ... | NODE_TOKEN=x CLAIM_URL=y NODE_IMAGE_CHANNEL=latest bash
+NODE_IMAGE_CHANNEL="${NODE_IMAGE_CHANNEL:-stable}"
+if [ "$NODE_IMAGE_CHANNEL" = "stable" ] && [ -n "$NODE_IMAGE_PINNED" ]; then
+  NODE_IMAGE="$NODE_IMAGE_PINNED"
+  ok "Образ marzban-node: зафиксированная версия ($NODE_IMAGE)"
+else
+  [ "$NODE_IMAGE_CHANNEL" = "stable" ] && warn "Бот не прислал зафиксированную версию — беру :latest."
+  NODE_IMAGE="gozargah/marzban-node:latest"
+  warn "Образ marzban-node: :latest — версия не зафиксирована."
+fi
+
 echo; ok "Поднимаю marzban-node…"
 mkdir -p /opt/marzban-node
 cat > /opt/marzban-node/docker-compose.yml <<EOF
 services:
   marzban-node:
-    image: gozargah/marzban-node:latest
+    image: ${NODE_IMAGE}
     restart: always
     network_mode: host
     environment:

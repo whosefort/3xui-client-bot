@@ -24,6 +24,9 @@ log = logging.getLogger("http_api")
 _XRAY_VERSION_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "node", "XRAY_VERSION"
 )
+_NODE_IMAGE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "node", "MARZBAN_NODE_IMAGE"
+)
 # см. docker-compose.yml — тот же серт, что панель уже использует на 443.
 _CERT_DIR = "/app/marzban-certs"
 _CERT_FILE = os.path.join(_CERT_DIR, "fullchain.pem")
@@ -33,6 +36,14 @@ _KEY_FILE = os.path.join(_CERT_DIR, "key.pem")
 def _read_xray_version() -> str:
     try:
         with open(_XRAY_VERSION_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _read_node_image() -> str:
+    try:
+        with open(_NODE_IMAGE_FILE) as f:
             return f.read().strip()
     except OSError:
         return ""
@@ -60,6 +71,7 @@ async def _claim(request: web.Request) -> web.Response:
         "cert_pem": row["cert_pem"],
         "panel_ip": row["panel_ip"],
         "xray_version": _read_xray_version(),
+        "node_image": _read_node_image(),
     })
 
 
