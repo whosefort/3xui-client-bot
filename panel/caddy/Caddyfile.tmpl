@@ -33,5 +33,11 @@ http://__SUB_DOMAIN__ {
 
 __SUB_DOMAIN__ {
 	tls /etc/letsencrypt/live/__SUB_DOMAIN__/fullchain.pem /etc/letsencrypt/live/__SUB_DOMAIN__/privkey.pem
+	# Happ ушёл на per-subscription роутинг — без этого заголовка каждый
+	# клиент настраивает bypass-правила руками в приложении. Заголовок
+	# routing с happ://routing/onadd/... даёт Happ готовый профиль на JSON-
+	# подписке — залочен от редактирования, применяется сам. Значение —
+	# panel/happ_routing.deeplink (see setup.sh), не хардкожено тут.
+	header routing "__HAPP_ROUTING__"
 	reverse_proxy 127.0.0.1:8001
 }

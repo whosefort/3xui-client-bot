@@ -110,11 +110,22 @@ chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-caddy.sh
 ok "Deploy-hook на продление настроен"
 
 # ─── 7. Caddyfile из шаблона ──────────────────────────────────────────────────
+# Happ per-subscription routing (см. ../happ_routing.deeplink) — если пин-файла
+# нет, просто убираем строку с заголовком целиком, а не оставляем пустое значение.
+HAPP_ROUTING_FILE="$SCRIPT_DIR/../happ_routing.deeplink"
 sed \
     -e "s#__MON_DOMAIN__#${MON_DOMAIN}#g" \
     -e "s#__SUB_DOMAIN__#${SUB_DOMAIN}#g" \
     -e "s#__MON_CERT_DIR__#${MON_CERT_DIR}#g" \
     "$SCRIPT_DIR/Caddyfile.tmpl" > /etc/caddy/Caddyfile
+if [ -f "$HAPP_ROUTING_FILE" ]; then
+    HAPP_ROUTING="$(tr -d '[:space:]' < "$HAPP_ROUTING_FILE")"
+    sed -i "s#__HAPP_ROUTING__#${HAPP_ROUTING}#g" /etc/caddy/Caddyfile
+    ok "Happ routing-профиль подставлен из happ_routing.deeplink"
+else
+    sed -i '/header routing "__HAPP_ROUTING__"/d' /etc/caddy/Caddyfile
+    warn "panel/happ_routing.deeplink не найден — заголовок routing не добавлен"
+fi
 caddy validate --config /etc/caddy/Caddyfile || die "Caddyfile не прошёл валидацию"
 ok "Caddyfile сгенерирован и провалидирован"
 

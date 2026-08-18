@@ -33,6 +33,19 @@ cd /opt/marzban && docker compose up -d   # НЕ restart — не подхват
 certbot renew --dry-run                   # проверить, что автопродление реально работает
 ```
 
+## Happ per-subscription routing
+
+Happ переехал на роутинг, привязанный к конкретной подписке — без готового
+профиля от провайдера клиенту приходится настраивать bypass-правила в
+приложении руками. `setup.sh` сам подставляет заголовок `routing` на sub.-
+домене из `../happ_routing.deeplink` (уже готовый `happ://routing/onadd/...`,
+взят из [roscomvpn-routing](https://github.com/hydraponique/roscomvpn-routing) —
+RU/BY напрямую, YouTube/Telegram/GitHub через прокси, реклама/торренты/
+телеметрия блокируются). Файла нет — заголовок просто не добавляется, ничего
+не ломается. Обновить профиль: скачать свежий `HAPP/DEFAULT.DEEPLINK` из
+репозитория выше и заменить содержимое `panel/happ_routing.deeplink`, потом
+`bash setup.sh` заново (идемпотентно).
+
 ## ⚠️ Готча: `certbot renew` виснет / отдаёт 404 на challenge-путь
 
 Даже если сертификаты подключены через explicit `tls <файл>`, Caddy всё равно
