@@ -53,14 +53,17 @@ if source.count(old) != 1:
 path.write_text(source.replace(old, new, 1))
 PYFIX
 
-# reality-fragment: fragment_setting на хосте доходит до vless-ссылки только
-# для tls=="tls" — ветка tls=="reality" его никогда не проверяла (апстрим
-# просто забыл). Без этого fragment (обход DPI по сигнатуре ClientHello)
-# на REALITY-инбаундах в принципе не мог долететь до клиента через подписку.
+# reality-fragment: fragment_setting на хосте доходит до ссылки только для
+# tls=="tls" — ветка tls=="reality" его никогда не проверяла (апстрим просто
+# забыл). Без этого fragment (обход DPI по сигнатуре ClientHello) на
+# REALITY-инбаундах в принципе не мог долететь до клиента через подписку.
+# В файле три идентичных блока (vmess/vless/trojan) — правим только внутри
+# def vless(), тем же приёмом anchor+index, что и encryption=none выше.
 RUN python - <<'PYFIX'
 from pathlib import Path
 path = Path("/code/app/subscription/v2ray.py")
 source = path.read_text()
+start = source.index("    def vless(")
 old = '''        elif tls == "reality":
             payload["sni"] = sni
             payload["fp"] = fp
@@ -77,7 +80,6 @@ new = '''        elif tls == "reality":
                 payload["spx"] = spx
             if fs:
                 payload["fragment"] = fs'''
-if source.count(old) != 1:
-    raise SystemExit(f"Expected exactly one reality payload block, found {source.count(old)}")
-path.write_text(source.replace(old, new, 1))
+pos = source.index(old, start)
+path.write_text(source[:pos] + source[pos:].replace(old, new, 1))
 PYFIX
