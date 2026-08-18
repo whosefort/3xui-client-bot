@@ -67,14 +67,19 @@ bash panel/randomize_paths.sh
 
 **Архитектура:**
 ```
-mon.logs-storage17.com  --(Cloudflare, orange)-->  Caddy:443  --> Marzban:127.0.0.1:8001
-sub.logs-storage17.com  --(DNS-only, серое)----->  Caddy:443  --> Marzban:127.0.0.1:8001
+mon.твой-домен.tld  --(Cloudflare, orange)-->  Caddy:443  --> Marzban:127.0.0.1:8001
+sub.твой-домен.tld  --(DNS-only, серое)----->  Caddy:443  --> Marzban:127.0.0.1:8001
 ```
 Marzban больше не слушает публичный 443 напрямую — Caddy стоит перед ним и
 термирует TLS для обоих доменов (свой сертификат на каждый: CF Origin для
 `mon.`, честный Let's Encrypt для `sub.`).
 
-**Разворот (один раз, на мастере) — автоматом через `caddy/setup.sh`:**
+**Разворот — проще всего прямо из `deploy.sh`:** если бот и мастер-панель на
+одном сервере (обычный случай), в разделе «Marzban панель» скрипт сам
+спросит, настроить ли поддомен, и запустит `caddy/setup.sh` — нужен только
+root и заранее заведённая A-запись (DNS only) на новый поддомен.
+
+**Вручную (один раз, на мастере) — тот же `caddy/setup.sh`:**
 1. Завести в Cloudflare A-запись для нового поддомена (например `sub`) на IP
    мастера, **Proxy status: DNS only** — критично, иначе смысл теряется.
 2. `scp -r panel/caddy root@<мастер>:/root/caddy-setup`, затем на сервере:

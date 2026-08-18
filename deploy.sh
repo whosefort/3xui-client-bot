@@ -266,6 +266,37 @@ PY
             echo "  порту провижининга за Cloudflare, переиспользуем cert панели:"
             ask_optional MARZBAN_CERT_DIR "MARZBAN_CERT_DIR" "/var/lib/marzban/certs"
         fi
+
+        echo ""
+        echo -e "  ${BOLD}── Поддомен подписки мимо Cloudflare (опционально) ───${NC}"
+        echo "  Если подписку блокируют DPI/провайдеры в некоторых регионах (домен"
+        echo "  идёт через Cloudflare) — заводим ВТОРОЙ поддомен без CF, со своим"
+        echo "  Let's Encrypt сертификатом. Дашборд остаётся как есть. Подробнее —"
+        echo "  panel/caddy/README.md."
+        read -rp "  Настроить сейчас? Нужен root НА ЭТОМ сервере = мастер-панели [y/N] " CADDY_YN
+        if [[ "${CADDY_YN:-N}" =~ ^[Yy]$ ]]; then
+            if [ "$(id -u)" != "0" ]; then
+                warn "Нужен root — пропускаю. Позже вручную: MON_DOMAIN=... SUB_DOMAIN=... panel/caddy/setup.sh"
+            elif [ ! -x "panel/caddy/setup.sh" ]; then
+                warn "panel/caddy/setup.sh не найден рядом с deploy.sh — пропускаю"
+            else
+                MON_DOMAIN_DEFAULT="$(echo "$MARZBAN_URL" | sed -E 's#^https?://##; s#/.*##')"
+                ask CADDY_MON_DOMAIN "Домен дашборда (сейчас через Cloudflare)" "$MON_DOMAIN_DEFAULT"
+                ask CADDY_SUB_DOMAIN "Новый домен подписки"
+                echo "  Заведи A-запись ${CADDY_SUB_DOMAIN} на IP этого сервера, Proxy status: DNS only."
+                read -rp "  Готово, продолжаем? [y/N] " DNS_OK
+                if [[ "${DNS_OK:-N}" =~ ^[Yy]$ ]]; then
+                    if MON_DOMAIN="$CADDY_MON_DOMAIN" SUB_DOMAIN="$CADDY_SUB_DOMAIN" \
+                       MON_CERT_DIR="$MARZBAN_CERT_DIR" panel/caddy/setup.sh; then
+                        ok "Caddy настроен — подписка теперь через https://${CADDY_SUB_DOMAIN}"
+                    else
+                        warn "panel/caddy/setup.sh упал — вывод выше, разбор готч в panel/caddy/README.md"
+                    fi
+                else
+                    warn "Пропускаю — заведи DNS и запусти вручную: panel/caddy/setup.sh"
+                fi
+            fi
+        fi
     else
         # ── 3X-UI ─────────────────────────────────────────────────────────────────
         echo -e "  ${BOLD}── 3X-UI панель ──────────────────────────────────────${NC}"
