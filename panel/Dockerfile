@@ -52,3 +52,32 @@ if source.count(old) != 1:
     raise SystemExit(f"Expected exactly one main-core restart block, found {source.count(old)}")
 path.write_text(source.replace(old, new, 1))
 PYFIX
+
+# reality-fragment: fragment_setting на хосте доходит до vless-ссылки только
+# для tls=="tls" — ветка tls=="reality" его никогда не проверяла (апстрим
+# просто забыл). Без этого fragment (обход DPI по сигнатуре ClientHello)
+# на REALITY-инбаундах в принципе не мог долететь до клиента через подписку.
+RUN python - <<'PYFIX'
+from pathlib import Path
+path = Path("/code/app/subscription/v2ray.py")
+source = path.read_text()
+old = '''        elif tls == "reality":
+            payload["sni"] = sni
+            payload["fp"] = fp
+            payload["pbk"] = pbk
+            payload["sid"] = sid
+            if spx:
+                payload["spx"] = spx'''
+new = '''        elif tls == "reality":
+            payload["sni"] = sni
+            payload["fp"] = fp
+            payload["pbk"] = pbk
+            payload["sid"] = sid
+            if spx:
+                payload["spx"] = spx
+            if fs:
+                payload["fragment"] = fs'''
+if source.count(old) != 1:
+    raise SystemExit(f"Expected exactly one reality payload block, found {source.count(old)}")
+path.write_text(source.replace(old, new, 1))
+PYFIX
