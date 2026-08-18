@@ -74,26 +74,20 @@ Marzban больше не слушает публичный 443 напрямую
 термирует TLS для обоих доменов (свой сертификат на каждый: CF Origin для
 `mon.`, честный Let's Encrypt для `sub.`).
 
-**Разворот (один раз, на мастере):**
+**Разворот (один раз, на мастере) — автоматом через `caddy/setup.sh`:**
 1. Завести в Cloudflare A-запись для нового поддомена (например `sub`) на IP
    мастера, **Proxy status: DNS only** — критично, иначе смысл теряется.
-2. `.env` Marzban: `UVICORN_HOST="127.0.0.1"`, `UVICORN_PORT=8001`,
-   закомментировать `UVICORN_SSL_CERTFILE`/`UVICORN_SSL_KEYFILE` (TLS теперь
-   у Caddy, не у Marzban).
-3. Поставить Caddy (`apt` через официальный репозиторий cloudsmith).
-4. `caddy/Caddyfile` в этом репозитории → `/etc/caddy/Caddyfile` на сервере.
-5. Получить серт для `sub.` через `certbot certonly --standalone` (порт 80
-   свободен на этом шаге, Caddy ещё не запущен) — **дальнейшие продления**
-   переключить на `--webroot`, иначе `certbot renew` будет конфликтовать с
-   Caddy за порт 80 (см. `caddy/README.md`). Важно: в Caddyfile нужен глобальный
-   `auto_https off` — иначе Caddy сам перехватывает ACME-challenge путь ДО
-   вебрут-хендлера и `certbot renew` виснет/получает 404 (подробности и готовый
-   Caddyfile — `caddy/README.md`, раздел «Готча»).
-6. ACL: `caddy` работает не под root, дефолтный ACL на `/etc/letsencrypt/archive/sub.../`
-   нужен, иначе Caddy не прочитает privkey. Подробности и готовые команды —
+2. `scp -r panel/caddy root@<мастер>:/root/caddy-setup`, затем на сервере:
+   `MON_DOMAIN=mon.твой-домен SUB_DOMAIN=sub.твой-домен /root/caddy-setup/setup.sh`.
+   Скрипт идемпотентный: ставит Caddy/certbot/acl, правит `.env` Marzban
+   (`UVICORN_HOST/PORT`, `XRAY_SUBSCRIPTION_URL_PREFIX`), получает Let's Encrypt
+   серт под `sub.`, настраивает ACL и деплой-хук автопродления, собирает
+   `Caddyfile` из `caddy/Caddyfile.tmpl` и запускает Caddy. Подробности,
+   переменные и разбор готч (виснущий `certbot renew`, гонка порта 443) —
    `caddy/README.md`.
-7. `.env` Marzban: `XRAY_SUBSCRIPTION_URL_PREFIX = "https://sub.логи-домен"`.
-8. `docker compose up -d` (не `restart` — не подхватит переменные).
+3. Руками после скрипта: `cd /opt/marzban && docker compose up -d` (не
+   `restart` — не подхватит `.env`) и `certbot renew --dry-run` — убедиться,
+   что автопродление реально работает.
 
 ⚠️ **Известная гонка портов**, из-за нехватки в апстриме Marzban флага «не
 поднимать инбаунды локально» (см. патч #3 выше): локальный xray мастера

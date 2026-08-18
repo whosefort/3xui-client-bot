@@ -1,0 +1,37 @@
+# Сгенерировано panel/caddy/setup.sh — руками не редактировать, править шаблон.
+{
+	# Оба домена используют СВОИ явные сертификаты — автоматическое управление
+	# сертификатами Caddy не нужно и мешает: даже при explicit tls Caddy всё
+	# равно вешает свой ACME HTTP-01 solver на /.well-known/acme-challenge/*
+	# для ЛЮБОГО домена из site-блоков, перехватывая запрос ДО пользовательских
+	# handle{}. auto_https off убирает solver и авто-редирект — редиректы ниже
+	# прописаны вручную.
+	auto_https off
+}
+
+http://__MON_DOMAIN__ {
+	redir https://{host}{uri} permanent
+}
+
+__MON_DOMAIN__ {
+	tls __MON_CERT_DIR__/fullchain.pem __MON_CERT_DIR__/key.pem
+	reverse_proxy 127.0.0.1:8001
+}
+
+http://__SUB_DOMAIN__ {
+	# ACME HTTP-01 challenge для certbot renew --webroot — голый HTTP, без
+	# редиректа. Certbot сам создаёт вложенный путь
+	# <root>/.well-known/acme-challenge/<token>.
+	handle /.well-known/acme-challenge/* {
+		root * /var/www/acme-challenge
+		file_server
+	}
+	handle {
+		redir https://{host}{uri} permanent
+	}
+}
+
+__SUB_DOMAIN__ {
+	tls /etc/letsencrypt/live/__SUB_DOMAIN__/fullchain.pem /etc/letsencrypt/live/__SUB_DOMAIN__/privkey.pem
+	reverse_proxy 127.0.0.1:8001
+}

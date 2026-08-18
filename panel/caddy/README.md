@@ -3,68 +3,34 @@
 Зачем — см. `../README.md`, раздел «Безопасность: подписка мимо Cloudflare».
 Тут — конкретные команды установки/продления/восстановления.
 
-## Установка с нуля
+## Установка с нуля — автоматом
+
+Один скрипт делает всё: ставит Caddy/certbot/acl, правит `/opt/marzban/.env`,
+получает Let's Encrypt серт под sub.-домен, настраивает ACL и автопродление,
+генерирует `Caddyfile` из шаблона и запускает. Идемпотентный — можно гонять
+повторно (например, после смены домена).
 
 ```bash
-# 1. Caddy из официального репозитория
-apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-  | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-  | tee /etc/apt/sources.list.d/caddy-stable.list
-apt-get update && apt-get install -y caddy certbot acl
+scp -r panel/caddy root@<мастер>:/root/caddy-setup
+ssh root@<мастер> '
+  MON_DOMAIN=mon.ваш-домен.tld \
+  SUB_DOMAIN=sub.ваш-домен.tld \
+  /root/caddy-setup/setup.sh
+'
+```
 
-# 2. Marzban перестаёт биндить публичный 443 напрямую — в /opt/marzban/.env:
-#    UVICORN_HOST = "127.0.0.1"
-#    UVICORN_PORT = 8001
-#    # UVICORN_SSL_CERTFILE / UVICORN_SSL_KEYFILE — закомментировать, TLS теперь у Caddy
+Переменные (см. шапку `setup.sh`): `MON_DOMAIN`, `SUB_DOMAIN` — обязательны;
+`MON_CERT_DIR` (по умолчанию `/var/lib/marzban/certs`, серт для дашборд-домена
+должен уже лежать там как `fullchain.pem`+`key.pem` — обычно Cloudflare Origin
+CA), `MARZBAN_ENV` (по умолчанию `/opt/marzban/.env`).
+
+Перед запуском: в Cloudflare `SUB_DOMAIN` — DNS only (серое облако),
+`MON_DOMAIN` — Proxied (оранжевое), обе A-записи смотрят на IP мастера.
+
+Дальше руками — то, что скрипт не трогает:
+```bash
 cd /opt/marzban && docker compose up -d   # НЕ restart — не подхватит .env
-
-# 3. Порт 443 у мастера сейчас, скорее всего, держит локальный xray-core
-#    Marzban (см. ../README.md про гонку портов) — освободи его перед стартом Caddy:
-ss -tlnp | grep :443
-kill -9 <pid если это xray>
-
-# 4. Первый серт для sub.-домена — ПОКА Caddy не запущен, порт 80 свободен:
-mkdir -p /var/www/acme-challenge
-certbot certonly --standalone --non-interactive --agree-tos \
-  --register-unsafely-without-email -d sub.ваш-домен.tld
-
-# 5. ACL — caddy работает не под root, дефолтный ACL на архив сертов:
-setfacl -d -m u:caddy:r /etc/letsencrypt/archive/sub.ваш-домен.tld/
-setfacl -m u:caddy:r /etc/letsencrypt/archive/sub.ваш-домен.tld/privkey1.pem
-setfacl -m u:caddy:r /etc/letsencrypt/archive/sub.ваш-домен.tld/fullchain1.pem
-setfacl -m u:caddy:x /etc/letsencrypt/archive /etc/letsencrypt/live
-
-# 6. Конфиг Caddy (подставь свои домены) → запуск:
-scp Caddyfile root@<мастер>:/etc/caddy/Caddyfile
-caddy validate --config /etc/caddy/Caddyfile
-systemctl start caddy
-
-# 7. Переключить продление certbot на webroot (standalone конфликтует с Caddy
-#    за порт 80 при каждом renew):
-sed -i 's/^authenticator = standalone/authenticator = webroot/' \
-  /etc/letsencrypt/renewal/sub.ваш-домен.tld.conf
-cat >> /etc/letsencrypt/renewal/sub.ваш-домен.tld.conf <<'EOF'
-[[webroot_map]]
-sub.ваш-домен.tld = /var/www/acme-challenge
-EOF
-
-# 8. Хук: после продления перевыдать ACL на новый номерной файл + перечитать Caddy
-mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-cat > /etc/letsencrypt/renewal-hooks/deploy/reload-caddy.sh <<'EOF'
-#!/bin/sh
-setfacl -m u:caddy:r /etc/letsencrypt/archive/sub.ваш-домен.tld/privkey*.pem \
-                     /etc/letsencrypt/archive/sub.ваш-домен.tld/fullchain*.pem 2>/dev/null
-systemctl reload caddy
-EOF
-chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-caddy.sh
-
-# 9. Проверка, что продление реально сработает (без реального продления):
-certbot renew --dry-run
-
-# 10. Marzban: XRAY_SUBSCRIPTION_URL_PREFIX = "https://sub.ваш-домен.tld"
-cd /opt/marzban && docker compose up -d
+certbot renew --dry-run                   # проверить, что автопродление реально работает
 ```
 
 ## ⚠️ Готча: `certbot renew` виснет / отдаёт 404 на challenge-путь
@@ -89,8 +55,9 @@ challenge"` — Caddy сам себе мешает, это не баг в кон
 }
 ```
 плюс явные `http://` site-блоки с ручным редиректом на https для КАЖДОГО
-домена (см. `Caddyfile` в этой папке — без этого пропадёт автоматический
-http→https редирект, который раньше давал `auto_https`).
+домена (см. `Caddyfile.tmpl` в этой папке — без этого пропадёт автоматический
+http→https редирект, который раньше давал `auto_https`). `setup.sh` уже
+собирает конфиг именно так.
 
 Отдельная ловушка при ручном тестировании этого пути: certbot кладёт challenge-
 файл не в корень `root`, а во вложенный `<root>/.well-known/acme-challenge/<token>`
