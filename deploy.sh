@@ -144,6 +144,8 @@ if [ "${SKIP_SETUP:-0}" -eq 0 ]; then
     SUB_URL_TEMPLATE=""
     MARZBAN_URL=""; MARZBAN_USERNAME=""; MARZBAN_PASSWORD=""; MARZBAN_RESET_STRATEGY="month"
     MARZBAN_PROXIES=""; MARZBAN_INBOUNDS=""
+    NODE_PROVISION_ENABLED="false"; NODE_PROVISION_PORT="8443"
+    NODE_TOKEN_TTL_SECONDS="1800"; MARZBAN_CERT_DIR="/var/lib/marzban/certs"
 
     echo ""
     if [ "$PANEL_BACKEND" = "marzban" ]; then
@@ -249,6 +251,21 @@ PY
             echo "  JSON inbounds, например {\"vless\":[\"VLESS REALITY\"]}"
             ask_optional MARZBAN_INBOUNDS "MARZBAN_INBOUNDS" "{\"vless\":[\"VLESS REALITY\"]}"
         fi
+
+        echo ""
+        echo -e "  ${BOLD}── Авторазвёртывание нод («🖥 Добавить сервер») ───────${NC}"
+        echo "  Открывает у бота ОДИН входящий HTTP-порт (обычно он только long-polling,"
+        echo "  без входящих портов вообще) — осознанное исключение, см. node/README.md."
+        read -rp "  Включить кнопку «Добавить сервер» в админке? [y/N] " NODE_PROVISION_YN
+        if [[ "${NODE_PROVISION_YN:-N}" =~ ^[Yy]$ ]]; then
+            NODE_PROVISION_ENABLED="true"
+            echo "  Порт (Cloudflare проксирует без доп. настройки: 443/2053/2083/2087/2096/8443):"
+            ask_optional NODE_PROVISION_PORT "NODE_PROVISION_PORT" "8443"
+            ask_optional NODE_TOKEN_TTL_SECONDS "Время жизни токена, сек" "1800"
+            echo "  Каталог с cert панели (fullchain.pem/key.pem) НА ХОСТЕ — нужен TLS на"
+            echo "  порту провижининга за Cloudflare, переиспользуем cert панели:"
+            ask_optional MARZBAN_CERT_DIR "MARZBAN_CERT_DIR" "/var/lib/marzban/certs"
+        fi
     else
         # ── 3X-UI ─────────────────────────────────────────────────────────────────
         echo -e "  ${BOLD}── 3X-UI панель ──────────────────────────────────────${NC}"
@@ -350,6 +367,12 @@ MARZBAN_PASSWORD=${MARZBAN_PASSWORD:-}
 MARZBAN_RESET_STRATEGY=${MARZBAN_RESET_STRATEGY:-month}
 MARZBAN_PROXIES=${MARZBAN_PROXIES:-}
 MARZBAN_INBOUNDS=${MARZBAN_INBOUNDS:-}
+
+# ===== Авторазвёртывание нод («🖥 Добавить сервер» в админке) =====
+NODE_PROVISION_ENABLED=${NODE_PROVISION_ENABLED:-false}
+NODE_PROVISION_PORT=${NODE_PROVISION_PORT:-8443}
+NODE_TOKEN_TTL_SECONDS=${NODE_TOKEN_TTL_SECONDS:-1800}
+MARZBAN_CERT_DIR=${MARZBAN_CERT_DIR:-/var/lib/marzban/certs}
 
 # ===== Подписка (используется, если PANEL_BACKEND=xui — Marzban отдаёт
 # subscription_url сам, шаблон ему не нужен) =====
