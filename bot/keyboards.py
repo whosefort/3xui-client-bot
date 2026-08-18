@@ -94,9 +94,11 @@ ADM_SETTINGS = "💳 Цена/реквизиты"
 ADM_BROADCAST = "📢 Рассылка"
 ADM_ADD_SERVER = "🖥 Добавить сервер"
 ADM_SERVERS = "🌍 Серверы"
+ADM_REALITY = "🛡 Соединение"
 
 
-def admin_kb(show_add_server: bool = False, show_servers: bool = False) -> ReplyKeyboardMarkup:
+def admin_kb(show_add_server: bool = False, show_servers: bool = False,
+             show_reality: bool = False) -> ReplyKeyboardMarkup:
     """Постоянная клавиатура под полем ввода у админа."""
     kb = ReplyKeyboardBuilder()
     kb.button(text=ADM_REQUESTS)
@@ -106,9 +108,11 @@ def admin_kb(show_add_server: bool = False, show_servers: bool = False) -> Reply
     kb.button(text=ADM_SETTINGS)
     kb.button(text=ADM_BROADCAST)
     rows = [2, 2, 2]
-    tail = int(show_servers) + int(show_add_server)
+    tail = int(show_servers) + int(show_add_server) + int(show_reality)
     if show_servers:
         kb.button(text=ADM_SERVERS)
+    if show_reality:
+        kb.button(text=ADM_REALITY)
     if show_add_server:
         kb.button(text=ADM_ADD_SERVER)
     if tail:
@@ -162,6 +166,47 @@ def server_card_kb(key: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✏️ Переименовать", callback_data=f"srv:rename:{key}")
     kb.button(text="↩️ К списку", callback_data="srv:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def reality_menu_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 Сменить SNI (домен)", callback_data="rl:sni")
+    kb.button(text="🔍 Найти SNI-домены (скан)", callback_data="rl:scan")
+    kb.button(text="🔑 Перегенерить ключи", callback_data="rl:keys")
+    kb.button(text="🆔 Перегенерить shortId", callback_data="rl:shortids")
+    kb.button(text="✖️ Закрыть", callback_data="rl:close")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def reality_confirm_kb(action: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Подтвердить", callback_data=f"rl:go:{action}")
+    kb.button(text="✖️ Отмена", callback_data="rl:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def reality_sni_result_kb(ok: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if ok:
+        kb.button(text="✅ Применить", callback_data="rl:sniapply")
+    else:
+        kb.button(text="⚠️ Всё равно применить", callback_data="rl:sniapply")
+    kb.button(text="✖️ Отмена", callback_data="rl:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def reality_scan_results_kb(domains: list[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for d in domains:
+        cb = f"rl:pick:{d}"
+        if len(cb.encode()) <= 64:
+            kb.button(text=d, callback_data=cb)
+    kb.button(text="✖️ Отмена", callback_data="rl:menu")
     kb.adjust(1)
     return kb.as_markup()
 

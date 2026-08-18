@@ -18,12 +18,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from .. import db, keyboards as kb, node_provision, texts
+from .. import db, keyboards as kb, node_provision, reality_admin, reality_scan, texts
 from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
-                         confirm_delete_kb, confirm_unlimited_kb, server_card_kb,
-                         settings_kb, sub_fallback_kb)
+                         confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
+                         reality_menu_kb, reality_scan_results_kb, reality_sni_result_kb,
+                         server_card_kb, settings_kb, sub_fallback_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
 from .common import get_traffic_gb
@@ -52,6 +53,8 @@ class AdminFSM(StatesGroup):
     card_label = State()         # ждём текст ручной подписи клиента
     card_note = State()          # ждём текст описания клиента (для админа)
     rename_server = State()      # ждём новое имя сервера (remark хоста)
+    reality_sni = State()        # ждём домен для смены SNI
+    reality_scan = State()       # ждём цель (IP/CIDR/домен) для скана RealiTLScanner
 
 
 # ---------- форматирование ----------
@@ -125,7 +128,7 @@ async def adm_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "🛠 <b>Админ-панель</b>\nВыберите действие на клавиатуре ниже.",
-        reply_markup=admin_kb(_add_server_available(), _servers_available()),
+        reply_markup=admin_kb(_add_server_available(), _servers_available(), _servers_available()),
     )
 
 
@@ -138,7 +141,7 @@ async def cmd_help(message: Message) -> None:
         "/requisites &lt;текст&gt; — реквизиты\n"
         "/grant &lt;tg_id&gt; — выдать вручную\n"
         "/broadcast &lt;текст&gt; — рассылка\n",
-        reply_markup=admin_kb(_add_server_available(), _servers_available()),
+        reply_markup=admin_kb(_add_server_available(), _servers_available(), _servers_available()),
     )
 
 
@@ -1220,6 +1223,197 @@ async def rename_server_input(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Ошибка при обращении к панели. См. логи.")
         return
     await message.answer(f"✅ Сервер теперь называется «{html.escape(text)}».")
+
+
+# =====================================================================
+#  СОЕДИНЕНИЕ (SNI-камуфляж, ключи, shortId REALITY)
+# =====================================================================
+
+async def _reality_menu_text() -> str:
+    try:
+        s = await reality_admin.get_settings()
+    except reality_admin.RealityError as e:
+        return f"❌ Не удалось получить настройки: {e}"
+    sni = ", ".join(s["server_names"]) or "—"
+    return (
+        f"🛡 <b>Соединение (REALITY)</b>\n"
+        f"Камуфляж (SNI): <code>{html.escape(sni)}</code>\n"
+        f"dest: <code>{html.escape(s['dest'])}</code>\n"
+        f"publicKey: <code>{html.escape(s['public_key'])}</code>\n"
+        f"shortId: <b>{len(s['short_ids'])}</b> шт.\n\n"
+        f"Правки применяются сразу на весь кластер (общий конфиг), без "
+        f"грейс-периода — старые ключи/shortId перестают работать немедленно. "
+        f"Подписка генерируется на лету, отдельно рассылать новые ссылки не надо."
+    )
+
+
+@router.message(F.text == kb.ADM_REALITY)
+async def kb_reality(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if not _servers_available():
+        await message.answer("Недоступно: нужен PANEL_BACKEND=marzban.")
+        return
+    await message.answer(await _reality_menu_text(), reply_markup=reality_menu_kb())
+
+
+@router.callback_query(F.data == "rl:close")
+async def cb_rl_close(cb: CallbackQuery) -> None:
+    await cb.message.delete()
+    await cb.answer()
+
+
+@router.callback_query(F.data == "rl:menu")
+async def cb_rl_menu(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cb.message.edit_text(await _reality_menu_text(), reply_markup=reality_menu_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "rl:sni")
+async def cb_rl_sni(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminFSM.reality_sni)
+    await cb.message.answer(
+        "🔄 Пришли новый домен-камуфляж (например <code>dl.google.com</code>) — "
+        "без https:// и порта. Проверю TLS1.3/серт перед применением.\n"
+        "Отмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+async def _check_and_offer(message: Message, state: FSMContext, domain: str) -> None:
+    domain = domain.strip().lower()
+    if not domain or " " in domain or "/" in domain:
+        await message.answer("Не похоже на домен. Отменено.")
+        await state.clear()
+        return
+    await message.answer(f"Проверяю {html.escape(domain)}…")
+    result = await reality_admin.check_sni_candidate(domain)
+    await state.update_data(sni_domain=domain)
+    if result["ok"]:
+        text = (
+            f"✅ <code>{html.escape(domain)}</code> годится: TLS {result['tls_version']}, "
+            f"ALPN {html.escape(result['alpn'])}, издатель серта «{html.escape(result['issuer'])}».\n"
+            f"Применить как новый SNI-камуфляж?"
+        )
+    else:
+        text = (
+            f"⚠️ <code>{html.escape(domain)}</code> не прошёл проверку: {html.escape(result['reason'])}.\n"
+            f"Можно всё равно применить (на свой риск — REALITY может не заработать), или выбрать другой домен."
+        )
+    await message.answer(text, reply_markup=reality_sni_result_kb(result["ok"]))
+
+
+@router.message(AdminFSM.reality_sni, F.text)
+async def reality_sni_input(message: Message, state: FSMContext) -> None:
+    await _check_and_offer(message, state, message.text or "")
+
+
+@router.callback_query(F.data.startswith("rl:pick:"))
+async def cb_rl_pick(cb: CallbackQuery, state: FSMContext) -> None:
+    domain = cb.data.split(":", 2)[2]
+    await state.set_state(AdminFSM.reality_sni)
+    await cb.answer()
+    await _check_and_offer(cb.message, state, domain)
+
+
+@router.callback_query(F.data == "rl:sniapply")
+async def cb_rl_sniapply(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    domain = data.get("sni_domain")
+    if not domain:
+        await cb.answer("Домен потерялся, начни заново", show_alert=True)
+        return
+    await cb.answer()
+    await cb.message.answer(f"Применяю {html.escape(domain)}…")
+    try:
+        await reality_admin.set_sni(domain)
+    except reality_admin.RealityError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("reality set_sni failed")
+        await cb.message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    await cb.message.answer(f"✅ SNI-камуфляж теперь <code>{html.escape(domain)}</code>.")
+
+
+@router.callback_query(F.data == "rl:scan")
+async def cb_rl_scan(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminFSM.reality_scan)
+    await cb.message.answer(
+        "🔍 Пришли цель для скана — IP, домен или подсеть не крупнее /24 "
+        "(например <code>1.2.3.0/24</code>). Может занять до пары минут.\n"
+        "Отмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.reality_scan, F.text)
+async def reality_scan_input(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    target = (message.text or "").strip()
+    if not target:
+        await message.answer("Пусто. Отменено.")
+        return
+    await message.answer(f"Сканирую {html.escape(target)}…")
+    try:
+        results = await reality_scan.scan(target)
+    except reality_scan.ScanError as e:
+        await message.answer(f"❌ {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("reality_scan.scan failed")
+        await message.answer("❌ Ошибка при сканировании. См. логи.")
+        return
+    if not results:
+        await message.answer("Ничего подходящего не нашёл в этой цели.")
+        return
+    lines = [f"• <code>{html.escape(r['domain'])}</code> ({html.escape(r['geo'] or '—')})" for r in results]
+    await message.answer(
+        "🔍 Нашёл кандидатов:\n" + "\n".join(lines) + "\n\nВыбери, чтобы проверить и применить:",
+        reply_markup=reality_scan_results_kb([r["domain"] for r in results]),
+    )
+
+
+@router.callback_query(F.data == "rl:keys")
+async def cb_rl_keys(cb: CallbackQuery) -> None:
+    await cb.message.answer(
+        "🔑 Перегенерировать REALITY-ключи? Все текущие клиенты потеряют "
+        "соединение немедленно (без грейс-периода) и подключатся заново "
+        "на следующем обновлении подписки в приложении.",
+        reply_markup=reality_confirm_kb("keys"),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "rl:shortids")
+async def cb_rl_shortids(cb: CallbackQuery) -> None:
+    await cb.message.answer(
+        "🆔 Перегенерировать shortId? Все текущие клиенты потеряют "
+        "соединение немедленно и подключатся заново на следующем "
+        "обновлении подписки в приложении.",
+        reply_markup=reality_confirm_kb("shortids"),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("rl:go:"))
+async def cb_rl_go(cb: CallbackQuery) -> None:
+    action = cb.data.split(":", 2)[2]
+    await cb.answer()
+    try:
+        if action == "keys":
+            pub = await reality_admin.regenerate_keys()
+            await cb.message.answer(f"✅ Новые ключи применены. publicKey: <code>{html.escape(pub)}</code>")
+        elif action == "shortids":
+            ids = await reality_admin.regenerate_short_ids()
+            await cb.message.answer(f"✅ Новые shortId применены ({len(ids)} шт.).")
+    except reality_admin.RealityError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+    except Exception:  # noqa: BLE001
+        log.exception("reality action %s failed", action)
+        await cb.message.answer("❌ Ошибка при обращении к панели. См. логи.")
 
 
 # ---------- утилиты ----------
