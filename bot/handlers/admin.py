@@ -24,7 +24,8 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
                          confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
                          reality_menu_kb, reality_scan_results_kb, reality_sni_result_kb,
-                         server_card_kb, settings_kb, sub_fallback_kb, xray_upgrade_confirm_kb)
+                         server_card_kb, server_sni_picker_kb, settings_kb,
+                         sub_fallback_kb, xray_upgrade_confirm_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
 from .common import get_traffic_gb
@@ -54,6 +55,7 @@ class AdminFSM(StatesGroup):
     card_note = State()          # ждём текст описания клиента (для админа)
     rename_server = State()      # ждём новое имя сервера (remark хоста)
     server_sni = State()         # ждём домен для персонального SNI одной ноды
+    server_sni_scan = State()    # ждём цель скана для персонального SNI одной ноды
     reality_sni = State()        # ждём домен для смены SNI
     reality_scan = State()       # ждём цель (IP/CIDR/домен) для скана RealiTLScanner
 
@@ -1234,22 +1236,104 @@ async def cb_srv_sni(cb: CallbackQuery, state: FSMContext) -> None:
     key = cb.data.split(":", 2)[2]
     await state.set_state(AdminFSM.server_sni)
     await state.update_data(sni_key=key)
+
+    try:
+        settings = await reality_admin.get_settings()
+        used = list(settings["server_names"])
+    except reality_admin.RealityError:
+        used = []
+    suggestions = used + [d for d in reality_admin.SUGGESTED_DOMAINS if d not in used]
+
     await cb.message.answer(
-        "🎭 Пришли домен-камуфляж только для ЭТОЙ ноды (например "
-        "<code>www.speedtest.net</code>). Проверю TLS1.3/серт перед применением.\n\n"
+        "🎭 Домен-камуфляж только для ЭТОЙ ноды — выбери из предложенных или "
+        "впиши свой. Проверю TLS1.3/серт перед применением.\n\n"
         "⚠️ Это не полная изоляция: ядро xray у всех нод общее и технически "
         "примет и другие SNI из общего списка — но клиенты именно этой ноды "
-        "в ссылках увидят только выбранный домен.\n"
+        "в ссылках увидят только выбранный домен.",
+        reply_markup=server_sni_picker_kb(suggestions[:8]),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "srv:snimanual")
+async def cb_srv_snimanual(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not data.get("sni_key"):
+        await cb.answer("Сессия истекла, начни заново из карточки сервера", show_alert=True)
+        return
+    await cb.message.answer(
+        "Пришли домен текстом (например <code>www.speedtest.net</code>).\n"
         "Отмена — любая кнопка снизу."
     )
     await cb.answer()
 
 
+@router.callback_query(F.data.startswith("srv:snipick:"))
+async def cb_srv_snipick(cb: CallbackQuery, state: FSMContext) -> None:
+    domain = cb.data.split(":", 2)[2]
+    await cb.answer()
+    await _apply_host_sni(cb.message, state, domain)
+
+
+@router.callback_query(F.data == "srv:sniscan")
+async def cb_srv_sniscan(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not data.get("sni_key"):
+        await cb.answer("Сессия истекла, начни заново из карточки сервера", show_alert=True)
+        return
+    await state.set_state(AdminFSM.server_sni_scan)
+    await cb.message.answer(
+        "🔍 Пришли цель для скана — IP, домен или подсеть не крупнее /24 "
+        "(например <code>1.2.3.0/24</code>). Может занять до пары минут.\n"
+        "Отмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.server_sni_scan, F.text)
+async def server_sni_scan_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    sni_key = data.get("sni_key")
+    if not sni_key:
+        await state.clear()
+        await message.answer("Сессия истекла. Начни заново из карточки сервера.")
+        return
+    target = (message.text or "").strip()
+    if not target:
+        await message.answer("Пусто. Отменено.")
+        return
+    await message.answer(f"Сканирую {html.escape(target)}…")
+    try:
+        results = await reality_scan.scan(target)
+    except reality_scan.ScanError as e:
+        await message.answer(f"❌ {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("server_sni_scan_input: reality_scan.scan failed")
+        await message.answer("❌ Ошибка при сканировании. См. логи.")
+        return
+    if not results:
+        await message.answer("Ничего подходящего не нашёл в этой цели.")
+        return
+    # Возвращаемся в server_sni: следующий тап (пик из результатов или снова
+    # свой домен) должен применяться именно к этой ноде, sni_key уже в data.
+    await state.set_state(AdminFSM.server_sni)
+    domains = [r["domain"] for r in results]
+    await message.answer(
+        "🔍 Нашёл кандидатов — выбери, чтобы проверить и применить к этой ноде:",
+        reply_markup=server_sni_picker_kb(domains, show_scan=False),
+    )
+
+
 @router.message(AdminFSM.server_sni, F.text)
 async def server_sni_input(message: Message, state: FSMContext) -> None:
+    domain = (message.text or "").strip().lower()
+    await _apply_host_sni(message, state, domain)
+
+
+async def _apply_host_sni(message: Message, state: FSMContext, domain: str) -> None:
     data = await state.get_data()
     key = data.get("sni_key")
-    domain = (message.text or "").strip().lower()
     if not key or not domain or " " in domain or "/" in domain:
         await state.clear()
         await message.answer("Не похоже на домен. Отменено.")
@@ -1271,7 +1355,7 @@ async def server_sni_input(message: Message, state: FSMContext) -> None:
         await message.answer(f"❌ Не удалось: {e}")
         return
     except Exception:  # noqa: BLE001
-        log.exception("server_sni_input: set_host_sni failed")
+        log.exception("_apply_host_sni: set_host_sni failed")
         await message.answer("❌ Ошибка при обращении к панели. См. логи.")
         return
     await message.answer(f"✅ Эта нода теперь светит SNI <code>{html.escape(domain)}</code>.")

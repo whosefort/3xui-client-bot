@@ -171,6 +171,22 @@ def xray_upgrade_confirm_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def server_sni_picker_kb(domains: list[str], show_scan: bool = True) -> InlineKeyboardMarkup:
+    """domains: уже без дублей, в порядке показа — сперва то, что реально
+    используется в кластере, потом затравка из reality_admin.SUGGESTED_DOMAINS."""
+    kb = InlineKeyboardBuilder()
+    for d in domains:
+        cb = f"srv:snipick:{d}"
+        if len(cb.encode()) <= 64:
+            kb.button(text=d, callback_data=cb)
+    if show_scan:
+        kb.button(text="🔍 Просканировать", callback_data="srv:sniscan")
+    kb.button(text="✏️ Свой домен", callback_data="srv:snimanual")
+    kb.button(text="✖️ Отмена", callback_data="srv:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def server_card_kb(key: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✏️ Переименовать", callback_data=f"srv:rename:{key}")

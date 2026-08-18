@@ -26,6 +26,19 @@ from .node_provision import _UA, _marzban_auth, config_lock
 
 _DEFAULT_PORT = 443
 
+# Затравка для пикера SNI по конкретной ноде (bot/handlers/admin.py) — не
+# гарантия, что подойдёт: check_sni_candidate() всё равно гоняет честный
+# TLS1.3-хендшейк при выборе. Просто чтобы не печатать домен руками каждый
+# раз — известные, давно живущие сайты с честным TLS1.3 и настоящим CA.
+SUGGESTED_DOMAINS = [
+    "dl.google.com",
+    "www.microsoft.com",
+    "addons.mozilla.org",
+    "www.swift.org",
+    "s0.awsstatic.com",
+    "www.speedtest.net",
+]
+
 
 class RealityError(Exception):
     pass
