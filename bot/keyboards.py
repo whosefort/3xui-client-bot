@@ -42,8 +42,58 @@ def status_kb() -> InlineKeyboardMarkup:
     добавляет troubleshooting-кнопку для не подгружающейся ссылки-подписки."""
     kb = InlineKeyboardBuilder()
     kb.button(text="🔁 Продлить", callback_data="renew")
+    kb.button(text="📲 Как настроить", callback_data="setup:1")
     kb.button(text="⚠️ Подписка не подгружается?", callback_data="sub_fallback")
     kb.button(text="💬 Связаться", callback_data="support")
+    kb.button(text="↩️ В меню", callback_data="menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+# ===================== Мастер настройки (3 шага) =====================
+
+_HAPP_APPSTORE = "https://apps.apple.com/us/app/happ-proxy-utility/id6504287215"
+_HAPP_GOOGLE_PLAY = "https://play.google.com/store/apps/details?id=com.happproxy"
+
+
+def setup_start_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📲 Настроить (3 шага)", callback_data="setup:1")
+    kb.button(text="💬 Связаться", callback_data="support")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def setup_step1_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🍏 App Store", url=_HAPP_APPSTORE)
+    kb.button(text="🤖 Google Play", url=_HAPP_GOOGLE_PLAY)
+    kb.button(text="✅ Установил, дальше", callback_data="setup:2")
+    kb.button(text="↩️ В меню", callback_data="menu")
+    kb.adjust(2, 1, 1)
+    return kb.as_markup()
+
+
+def setup_step2_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Добавил, дальше", callback_data="setup:3")
+    kb.button(text="⬅️ Назад", callback_data="setup:1")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def setup_step3_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Включил, готово", callback_data="setup:done")
+    kb.button(text="🤔 Не нашёл эту настройку", callback_data="support")
+    kb.button(text="⬅️ Назад", callback_data="setup:2")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def setup_done_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 Моя подписка", callback_data="status")
     kb.button(text="↩️ В меню", callback_data="menu")
     kb.adjust(1)
     return kb.as_markup()

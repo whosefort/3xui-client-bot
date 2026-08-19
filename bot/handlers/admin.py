@@ -25,7 +25,7 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
                          reality_menu_kb, reality_scan_results_kb, reality_sni_result_kb,
                          server_card_kb, server_fp_picker_kb, server_sni_picker_kb,
-                         settings_kb, sub_fallback_kb, xray_upgrade_confirm_kb)
+                         settings_kb, setup_start_kb, xray_upgrade_confirm_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
 from .common import get_traffic_gb
@@ -220,7 +220,7 @@ async def _approve_new(req) -> None:
         tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
     db.upsert_user(tg_id, req["tg_username"], client_email=created.username, sub_id=created.sub_url)
     await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.sub_url),
-                         reply_markup=sub_fallback_kb())
+                         reply_markup=setup_start_kb())
 
 
 async def _approve_renew(req) -> None:
@@ -743,7 +743,7 @@ async def _do_grant(tg_id: int) -> str:
             tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
         db.upsert_user(tg_id, uname, client_email=created.username, sub_id=created.sub_url)
         await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.sub_url),
-                             reply_markup=sub_fallback_kb())
+                             reply_markup=setup_start_kb())
         return f"✅ Создана подписка для {tg_id}"
     except Exception:  # noqa: BLE001
         log.exception("grant failed")

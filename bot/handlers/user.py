@@ -13,7 +13,8 @@ from aiogram.types import CallbackQuery, Message
 from .. import db, texts
 from ..config import config
 from ..keyboards import (back_to_menu, confirm_paid, faq_answer_kb, faq_kb,
-                        main_menu, status_kb, sub_fallback_kb)
+                        main_menu, setup_done_kb, setup_step1_kb, setup_step2_kb,
+                        setup_step3_kb, status_kb, sub_fallback_kb)
 from ..runtime import get_panel
 from .common import get_price, get_requisites, notify_admins, resolve_client
 
@@ -115,6 +116,36 @@ async def cb_sub_fallback(cb: CallbackQuery) -> None:
         return
     text = texts.sub_fallback(cl.raw.get("links"))
     await cb.message.edit_text(text, reply_markup=sub_fallback_kb())
+    await cb.answer()
+
+
+# ---------- мастер настройки (3 шага) ----------
+
+@router.callback_query(F.data == "setup:1")
+async def cb_setup_1(cb: CallbackQuery) -> None:
+    await cb.message.edit_text(texts.setup_step1(), reply_markup=setup_step1_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "setup:2")
+async def cb_setup_2(cb: CallbackQuery) -> None:
+    cl = await resolve_client(cb.from_user.id)
+    if not cl:
+        await cb.answer("Подписка не найдена", show_alert=True)
+        return
+    await cb.message.edit_text(texts.setup_step2(cl.sub_url), reply_markup=setup_step2_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "setup:3")
+async def cb_setup_3(cb: CallbackQuery) -> None:
+    await cb.message.edit_text(texts.setup_step3(), reply_markup=setup_step3_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "setup:done")
+async def cb_setup_done(cb: CallbackQuery) -> None:
+    await cb.message.edit_text(texts.setup_done(), reply_markup=setup_done_kb())
     await cb.answer()
 
 
