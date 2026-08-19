@@ -24,8 +24,8 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
                          confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
                          reality_menu_kb, reality_scan_results_kb, reality_sni_result_kb,
-                         server_card_kb, server_sni_picker_kb, settings_kb,
-                         sub_fallback_kb, xray_upgrade_confirm_kb)
+                         server_card_kb, server_fp_picker_kb, server_sni_picker_kb,
+                         settings_kb, sub_fallback_kb, xray_upgrade_confirm_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
 from .common import get_traffic_gb
@@ -1171,29 +1171,41 @@ async def cb_srv_list(cb: CallbackQuery) -> None:
     await cb.answer()
 
 
+def _server_card_text(match: dict, tag: str) -> str:
+    sni_line = f"SNI: <code>{html.escape(match['sni'])}</code> (свой)" if match["sni"] \
+        else "SNI: общий дефолт кластера"
+    frag_line = "Fragment: включён (обход DPI по сигнатуре ClientHello)" if match["fragment"] \
+        else "Fragment: выключен"
+    fp_line = f"TLS-фингерпринт: <code>{html.escape(match['fp'])}</code>"
+    return (
+        f"🖥 <b>{html.escape(_server_label(match))}</b>\n"
+        f"Адрес: <code>{html.escape(match['address'])}</code>\n"
+        f"Инбаунд: <code>{html.escape(tag)}</code>\n"
+        f"{sni_line}\n"
+        f"{frag_line}\n"
+        f"{fp_line}"
+    )
+
+
+async def _find_server(tag: str, idx: str) -> dict | None:
+    servers = await node_provision.list_servers()
+    return next((s for s in servers if s["tag"] == tag and str(s["index"]) == idx), None)
+
+
 @router.callback_query(F.data.startswith("srv:open:"))
 async def cb_srv_open(cb: CallbackQuery) -> None:
     key = cb.data.split(":", 2)[2]
     tag, _, idx = key.partition(":")
     try:
-        servers = await node_provision.list_servers()
+        match = await _find_server(tag, idx)
     except node_provision.ProvisionError as e:
         await cb.answer(f"Ошибка: {e}", show_alert=True)
         return
-    match = next((s for s in servers if s["tag"] == tag and str(s["index"]) == idx), None)
     if not match:
         await cb.answer("Сервер не найден (список изменился)", show_alert=True)
         return
-    sni_line = f"SNI: <code>{html.escape(match['sni'])}</code> (свой)" if match["sni"] \
-        else "SNI: общий дефолт кластера"
-    frag_line = "Fragment: включён (обход DPI по сигнатуре ClientHello)" if match["fragment"] \
-        else "Fragment: выключен"
     await cb.message.edit_text(
-        f"🖥 <b>{html.escape(_server_label(match))}</b>\n"
-        f"Адрес: <code>{html.escape(match['address'])}</code>\n"
-        f"Инбаунд: <code>{html.escape(tag)}</code>\n"
-        f"{sni_line}\n"
-        f"{frag_line}",
+        _server_card_text(match, tag),
         reply_markup=server_card_kb(key, fragment_on=match["fragment"]),
     )
     await cb.answer()
@@ -1386,11 +1398,10 @@ async def cb_srv_fragtoggle(cb: CallbackQuery) -> None:
     key = cb.data.split(":", 2)[2]
     tag, _, idx = key.partition(":")
     try:
-        servers = await node_provision.list_servers()
+        match = await _find_server(tag, idx)
     except node_provision.ProvisionError as e:
         await cb.answer(f"Ошибка: {e}", show_alert=True)
         return
-    match = next((s for s in servers if s["tag"] == tag and str(s["index"]) == idx), None)
     if not match:
         await cb.answer("Сервер не найден (список изменился)", show_alert=True)
         return
@@ -1405,17 +1416,58 @@ async def cb_srv_fragtoggle(cb: CallbackQuery) -> None:
         await cb.answer("Ошибка при обращении к панели", show_alert=True)
         return
     await cb.answer("Fragment включён" if new_state else "Fragment выключен")
-    frag_line = "Fragment: включён (обход DPI по сигнатуре ClientHello)" if new_state \
-        else "Fragment: выключен"
-    sni_line = f"SNI: <code>{html.escape(match['sni'])}</code> (свой)" if match["sni"] \
-        else "SNI: общий дефолт кластера"
+    match["fragment"] = new_state
     await cb.message.edit_text(
-        f"🖥 <b>{html.escape(_server_label(match))}</b>\n"
-        f"Адрес: <code>{html.escape(match['address'])}</code>\n"
-        f"Инбаунд: <code>{html.escape(tag)}</code>\n"
-        f"{sni_line}\n"
-        f"{frag_line}",
+        _server_card_text(match, tag),
         reply_markup=server_card_kb(key, fragment_on=new_state),
+    )
+
+
+@router.callback_query(F.data.startswith("srv:fp:"))
+async def cb_srv_fp(cb: CallbackQuery) -> None:
+    key = cb.data.split(":", 2)[2]
+    tag, _, idx = key.partition(":")
+    try:
+        match = await _find_server(tag, idx)
+    except node_provision.ProvisionError as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    if not match:
+        await cb.answer("Сервер не найден (список изменился)", show_alert=True)
+        return
+    await cb.message.edit_text(
+        f"🫆 TLS-фингерпринт для <b>{html.escape(_server_label(match))}</b>. "
+        f"«randomized» — xray сам берёт случайный на каждое соединение, надёжнее "
+        f"фиксированного значения на всю ноду.",
+        reply_markup=server_fp_picker_kb(key, reality_admin.FINGERPRINT_OPTIONS, match["fp"]),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("srv:fppick:"))
+async def cb_srv_fppick(cb: CallbackQuery) -> None:
+    rest = cb.data[len("srv:fppick:"):]
+    fp, _, key = rest.partition(":")
+    tag, _, idx = key.partition(":")
+    try:
+        await reality_admin.set_host_fingerprint(tag, int(idx), fp)
+    except reality_admin.RealityError as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("cb_srv_fppick failed")
+        await cb.answer("Ошибка при обращении к панели", show_alert=True)
+        return
+    await cb.answer(f"Fingerprint: {fp}")
+    try:
+        match = await _find_server(tag, idx)
+    except node_provision.ProvisionError:
+        return
+    if not match:
+        return
+    await cb.message.edit_text(
+        _server_card_text(match, tag),
+        reply_markup=server_card_kb(key, fragment_on=match["fragment"]),
     )
 
 

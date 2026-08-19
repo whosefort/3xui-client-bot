@@ -139,6 +139,7 @@ async def list_servers() -> list[dict]:
                 "address": h.get("address") or "",
                 "sni": h.get("sni") or "",
                 "fragment": bool(h.get("fragment_setting")),
+                "fp": h.get("fingerprint") or "none",
             })
     return out
 

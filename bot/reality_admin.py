@@ -145,6 +145,34 @@ async def set_host_fragment(tag: str, index: int, enabled: bool) -> None:
                 raise RealityError(f"не смог сохранить fragment ({r.status}): {res}")
 
 
+# Marzban ProxyHostFingerprint enum. "randomized" — сам xray на КАЖДОМ
+# соединении берёт случайный отпечаток из набора, а не один статичный на
+# всю ноду — сильнее ручной раскидки по нодам (та фиксирована и тоже в
+# итоге фингерпринтится, просто на уровне "одна нода = один fp"). Дефолт
+# для всех хостов, если явно не задано другое.
+FINGERPRINT_OPTIONS = ["randomized", "chrome", "firefox", "safari", "ios", "android", "edge"]
+
+
+async def set_host_fingerprint(tag: str, index: int, fp: str) -> None:
+    if fp not in FINGERPRINT_OPTIONS:
+        raise RealityError(f"неизвестный fingerprint: {fp}")
+    async with config_lock, aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
+            hosts = await r.json(content_type=None)
+            if r.status >= 400:
+                raise RealityError(f"не смог получить хосты ({r.status}): {hosts}")
+        entries = hosts.get(tag)
+        if not entries or index >= len(entries):
+            raise RealityError(f"хост {tag}[{index}] не найден — список хостов изменился")
+        entries[index]["fingerprint"] = fp
+        async with s.put(f"{config.marzban_url}/api/hosts", json=hosts, headers=headers) as r:
+            res = await r.json(content_type=None)
+            if r.status >= 400:
+                raise RealityError(f"не смог сохранить fingerprint ({r.status}): {res}")
+
+
 async def set_host_sni(tag: str, index: int, domain: str | None) -> None:
     """SNI для ОДНОГО хоста (нода+инбаунд), не для всего кластера. Это не
     настоящая изоляция — ядро xray у всех нод общее и технически примет

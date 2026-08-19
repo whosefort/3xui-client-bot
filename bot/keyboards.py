@@ -196,7 +196,19 @@ def server_card_kb(key: str, fragment_on: bool = False) -> InlineKeyboardMarkup:
         text=("🧩 Fragment: выключить" if fragment_on else "🧩 Fragment: включить"),
         callback_data=f"srv:fragtoggle:{key}",
     )
+    kb.button(text="🫆 TLS-фингерпринт", callback_data=f"srv:fp:{key}")
     kb.button(text="↩️ К списку", callback_data="srv:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def server_fp_picker_kb(key: str, options: list[str], current: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for fp in options:
+        mark = "✅ " if fp == current else ""
+        label = f"{mark}{fp}" + (" (рекомендуется)" if fp == "randomized" else "")
+        kb.button(text=label, callback_data=f"srv:fppick:{fp}:{key}")
+    kb.button(text="✖️ Отмена", callback_data=f"srv:open:{key}")
     kb.adjust(1)
     return kb.as_markup()
 
