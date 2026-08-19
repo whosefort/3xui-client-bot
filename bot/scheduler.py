@@ -13,6 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from . import db, texts
 from .config import config
+from .keyboards import reminder_kb
 from .runtime import get_bot, get_panel
 
 log = logging.getLogger("scheduler")
@@ -55,7 +56,7 @@ async def reminders_sweep() -> None:
                 continue
 
             try:
-                await bot.send_message(tg_id, texts.reminder(days))
+                await bot.send_message(tg_id, texts.reminder(days), reply_markup=reminder_kb())
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("Напоминание не доставлено %s: %s", tg_id, e)

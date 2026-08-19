@@ -12,9 +12,9 @@ from aiogram.types import CallbackQuery, Message
 
 from .. import db, texts
 from ..config import config
-from ..keyboards import (back_to_menu, confirm_paid, faq_answer_kb, faq_kb,
-                        main_menu, setup_done_kb, setup_step1_kb, setup_step2_kb,
-                        setup_step3_kb, status_kb, sub_fallback_kb)
+from ..keyboards import (back_to_menu, bind_ok_kb, confirm_paid, faq_answer_kb,
+                        faq_kb, main_menu, setup_done_kb, setup_step1_kb,
+                        setup_step2_kb, setup_step3_kb, status_kb, sub_fallback_kb)
 from ..runtime import get_panel
 from .common import get_price, get_requisites, notify_admins, resolve_client
 
@@ -215,7 +215,7 @@ async def bind_input(message: Message, state: FSMContext) -> None:
         return
     await panel.bind_tgid(client=client, tg_id=me)
     db.upsert_user(me, _uname(message), client_email=client.username, sub_id=client.sub_url)
-    await message.answer(texts.bind_ok(), reply_markup=main_menu(True))
+    await message.answer(texts.bind_ok(), reply_markup=bind_ok_kb())
     await notify_admins(
         f"🔗 {html.escape(_uname(message) or str(me))} (id <code>{me}</code>) "
         f"привязал подписку <code>{html.escape(client.username)}</code>."

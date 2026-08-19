@@ -37,6 +37,15 @@ def faq_answer_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def reminder_kb() -> InlineKeyboardMarkup:
+    """Текст reminder() говорит «нажмите Продлить» — у сообщения обязана
+    быть эта кнопка, иначе человеку самому искать меню заново."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔁 Продлить", callback_data="renew")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def status_kb() -> InlineKeyboardMarkup:
     """Клавиатура под экраном статуса подписки (активная/бессрочная) —
     добавляет troubleshooting-кнопку для не подгружающейся ссылки-подписки."""
@@ -64,13 +73,22 @@ def setup_start_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def bind_ok_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📲 Настроить (3 шага)", callback_data="setup:1")
+    kb.button(text="📊 Моя подписка", callback_data="status")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def setup_step1_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🍏 App Store", url=_HAPP_APPSTORE)
     kb.button(text="🤖 Google Play", url=_HAPP_GOOGLE_PLAY)
+    kb.button(text="🍏 Пропал из App Store?", callback_data="faq:happ_removed")
     kb.button(text="✅ Установил, дальше", callback_data="setup:2")
     kb.button(text="↩️ В меню", callback_data="menu")
-    kb.adjust(2, 1, 1)
+    kb.adjust(2, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -94,6 +112,7 @@ def setup_step3_kb() -> InlineKeyboardMarkup:
 def setup_done_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Моя подписка", callback_data="status")
+    kb.button(text="🚫 VPN не подключается", callback_data="faq:vpn_down")
     kb.button(text="↩️ В меню", callback_data="menu")
     kb.adjust(1)
     return kb.as_markup()
