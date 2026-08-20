@@ -227,6 +227,8 @@ def servers_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     for key, label in items:
         kb.button(text=label, callback_data=f"srv:open:{key}")
     kb.button(text="🔄 Обновить xray на всех нодах", callback_data="srv:xrayup")
+    kb.button(text="🩺 Проверить все ноды", callback_data="srv:verifyall")
+    kb.button(text="📊 Ресурсы серверов", callback_data="srv:resources")
     kb.button(text="✖️ Закрыть", callback_data="srv:close")
     kb.adjust(1)
     return kb.as_markup()
@@ -266,6 +268,8 @@ def server_card_kb(key: str, fragment_on: bool = False) -> InlineKeyboardMarkup:
         callback_data=f"srv:fragtoggle:{key}",
     )
     kb.button(text="🫆 TLS-фингерпринт", callback_data=f"srv:fp:{key}")
+    kb.button(text="🩺 Проверить туннель", callback_data=f"srv:verify:{key}")
+    kb.button(text="📊 Ресурсы", callback_data=f"srv:res:{key}")
     kb.button(text="↩️ К списку", callback_data="srv:list")
     kb.adjust(1)
     return kb.as_markup()

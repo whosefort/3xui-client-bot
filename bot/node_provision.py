@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import uuid
 
 import aiohttp
 
@@ -164,3 +165,71 @@ async def rename_server(tag: str, index: int, remark: str) -> None:
             res = await r.json(content_type=None)
             if r.status >= 400:
                 raise ProvisionError(f"не смог сохранить remark ({r.status}): {res}")
+
+
+async def create_verify_client() -> dict | None:
+    """Одноразовый тестовый юзер на REALITY-инбаунде — для честной проверки
+    туннеля (bot/ssh_ops.verify_reality_tunnel), не для реального клиента.
+    Вызывающий обязан почистить через delete_verify_client() после теста,
+    даже при ошибке — иначе мусорный юзер останется в панели.
+    None, если в конфиге ещё нет ни одного REALITY-инбаунда (самая первая
+    настройка панели, ещё не дошли до Core Config)."""
+    from urllib.parse import parse_qsl, urlparse
+
+    async with aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+
+        async with s.get(f"{config.marzban_url}/api/core/config", headers=headers) as r:
+            cfg = await r.json(content_type=None)
+            if r.status >= 400:
+                raise ProvisionError(f"не смог получить core config ({r.status}): {cfg}")
+        reality_tags = [
+            ib["tag"] for ib in cfg.get("inbounds", [])
+            if ib.get("streamSettings", {}).get("security") == "reality"
+        ]
+        if not reality_tags:
+            return None
+        tag = reality_tags[0]
+
+        username = "verify-" + secrets.token_hex(4)
+        client_id = str(uuid.uuid4())
+        async with s.post(
+            f"{config.marzban_url}/api/user", headers=headers,
+            json={
+                "username": username, "status": "active",
+                "proxies": {"vless": {"id": client_id, "flow": "xtls-rprx-vision"}},
+                "inbounds": {"vless": [tag]},
+            },
+        ) as r:
+            created = await r.json(content_type=None)
+            if r.status >= 400:
+                raise ProvisionError(f"не смог создать тестового юзера ({r.status}): {created}")
+
+        async with s.get(f"{config.marzban_url}/api/user/{username}", headers=headers) as r:
+            user = await r.json(content_type=None)
+            if r.status >= 400:
+                raise ProvisionError(f"не смог получить ссылку тестового юзера ({r.status}): {user}")
+
+    links = user.get("links") or []
+    if not links:
+        raise ProvisionError("панель не вернула ссылку для тестового юзера")
+    q = dict(parse_qsl(urlparse(links[0]).query))
+    return {
+        "username": username,
+        "uuid": client_id,
+        "pbk": q.get("pbk"),
+        "sid": q.get("sid"),
+        "sni": q.get("sni"),
+        "fp": q.get("fp") or "chrome",
+    }
+
+
+async def delete_verify_client(username: str) -> None:
+    async with aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        async with s.delete(f"{config.marzban_url}/api/user/{username}", headers=headers) as r:
+            if r.status >= 400:
+                body = await r.text()
+                raise ProvisionError(f"не смог удалить тестового юзера {username} ({r.status}): {body}")

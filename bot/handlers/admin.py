@@ -11,6 +11,7 @@ import asyncio
 import html
 import ipaddress
 import logging
+import subprocess
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -1126,8 +1127,23 @@ def _servers_available() -> bool:
     return config.panel_backend == "marzban"
 
 
-def _server_label(s: dict) -> str:
-    return s["remark"] or s["address"] or f"{s['tag']}[{s['index']}]"
+def _server_label(s: dict, status_map: dict[str, str] | None = None) -> str:
+    name = s["remark"] or s["address"] or f"{s['tag']}[{s['index']}]"
+    if status_map is None:
+        return name
+    st = status_map.get(s["address"])
+    icon = "🟢 " if st == "connected" else "🔴 " if st else "⚪️ "
+    return icon + name
+
+
+async def _node_status_map() -> dict[str, str]:
+    """address -> статус из /api/nodes. Пусто при ошибке — тогда список
+    серверов просто покажется без иконок, не роняем весь экран из-за этого."""
+    try:
+        nodes = await node_provision.list_nodes()
+    except node_provision.ProvisionError:
+        return {}
+    return {n["address"]: n.get("status", "") for n in nodes}
 
 
 @router.message(F.text == kb.ADM_SERVERS)
@@ -1144,10 +1160,12 @@ async def kb_servers(message: Message, state: FSMContext) -> None:
     if not servers:
         await message.answer("Серверов пока нет.")
         return
-    items = [(f"{s['tag']}:{s['index']}", _server_label(s)) for s in servers]
+    status_map = await _node_status_map()
+    items = [(f"{s['tag']}:{s['index']}", _server_label(s, status_map)) for s in servers]
     await message.answer(
         f"🌍 Серверов: <b>{len(servers)}</b>\n"
-        f"Имя в списке — то, что клиент видит в своём VPN-приложении.",
+        f"Имя в списке — то, что клиент видит в своём VPN-приложении. "
+        f"🟢/🔴 — статус ноды в панели (connected/нет).",
         reply_markup=kb.servers_list_kb(items),
     )
 
@@ -1165,10 +1183,12 @@ async def cb_srv_list(cb: CallbackQuery) -> None:
     except node_provision.ProvisionError as e:
         await cb.answer(f"Ошибка: {e}", show_alert=True)
         return
-    items = [(f"{s['tag']}:{s['index']}", _server_label(s)) for s in servers]
+    status_map = await _node_status_map()
+    items = [(f"{s['tag']}:{s['index']}", _server_label(s, status_map)) for s in servers]
     await cb.message.edit_text(
         f"🌍 Серверов: <b>{len(servers)}</b>\n"
-        f"Имя в списке — то, что клиент видит в своём VPN-приложении.",
+        f"Имя в списке — то, что клиент видит в своём VPN-приложении. "
+        f"🟢/🔴 — статус ноды в панели (connected/нет).",
         reply_markup=kb.servers_list_kb(items),
     )
     await cb.answer()
@@ -1527,6 +1547,123 @@ async def cb_srv_xrayupgo(cb: CallbackQuery) -> None:
             log.exception("xray upgrade failed for node %s", name)
             lines.append(f"❌ {html.escape(name)} ({html.escape(address)}): см. логи бота")
     await cb.message.answer("Готово:\n" + "\n".join(lines))
+
+
+# ---------- честная проверка туннеля ----------
+
+async def _verify_one(address: str, name: str) -> str:
+    """Один прогон honest-check: тестовый юзер в панели → xray-клиент прямо
+    на ноде → curl через него. Юзер чистится ВСЕГДА, даже если сам тест упал
+    на середине — иначе панель обрастает мусорными verify-* аккаунтами."""
+    try:
+        client = await node_provision.create_verify_client()
+    except node_provision.ProvisionError as e:
+        return f"❌ {html.escape(name)}: не смог завести тестового юзера — {html.escape(str(e))}"
+    if client is None:
+        return f"⚠️ {html.escape(name)}: в панели ещё нет REALITY-инбаунда, нечего проверять"
+    try:
+        await ssh_ops.verify_reality_tunnel(address, client)
+        return f"✅ {html.escape(name)} ({html.escape(address)}): туннель работает"
+    except ssh_ops.SSHOpError as e:
+        return f"❌ {html.escape(name)} ({html.escape(address)}): {html.escape(str(e))}"
+    except Exception:  # noqa: BLE001
+        log.exception("verify_reality_tunnel failed for %s", address)
+        return f"❌ {html.escape(name)} ({html.escape(address)}): см. логи бота"
+    finally:
+        try:
+            await node_provision.delete_verify_client(client["username"])
+        except node_provision.ProvisionError:
+            log.exception("не смог удалить тестового юзера %s после проверки", client["username"])
+
+
+@router.callback_query(F.data.startswith("srv:verify:"))
+async def cb_srv_verify(cb: CallbackQuery) -> None:
+    key = cb.data.split(":", 2)[2]
+    tag, _, idx = key.partition(":")
+    await cb.answer()
+    try:
+        match = await _find_server(tag, idx)
+    except node_provision.ProvisionError as e:
+        await cb.message.answer(f"❌ Ошибка: {e}")
+        return
+    if not match:
+        await cb.message.answer("Сервер не найден (список изменился).")
+        return
+    await cb.message.answer(f"🩺 Проверяю {html.escape(_server_label(match))}…")
+    result = await _verify_one(match["address"], _server_label(match))
+    await cb.message.answer(result)
+
+
+@router.callback_query(F.data == "srv:verifyall")
+async def cb_srv_verifyall(cb: CallbackQuery) -> None:
+    await cb.answer()
+    try:
+        nodes = await node_provision.list_nodes()
+    except node_provision.ProvisionError as e:
+        await cb.message.answer(f"❌ Не смог получить список нод: {e}")
+        return
+    if not nodes:
+        await cb.message.answer("Нод нет.")
+        return
+    await cb.message.answer(f"🩺 Проверяю {len(nodes)} нод(ы) по очереди…")
+    lines = [await _verify_one(n["address"], n.get("name", "?")) for n in nodes]
+    await cb.message.answer("Готово:\n" + "\n".join(lines))
+
+
+# ---------- ресурсы сервера (RAM/диск) ----------
+
+@router.callback_query(F.data.startswith("srv:res:"))
+async def cb_srv_res(cb: CallbackQuery) -> None:
+    key = cb.data.split(":", 2)[2]
+    tag, _, idx = key.partition(":")
+    await cb.answer()
+    try:
+        match = await _find_server(tag, idx)
+    except node_provision.ProvisionError as e:
+        await cb.message.answer(f"❌ Ошибка: {e}")
+        return
+    if not match:
+        await cb.message.answer("Сервер не найден (список изменился).")
+        return
+    try:
+        out = await ssh_ops.get_resources(match["address"])
+    except ssh_ops.SSHOpError as e:
+        await cb.message.answer(f"❌ {e}")
+        return
+    await cb.message.answer(
+        f"📊 <b>{html.escape(_server_label(match))}</b>\n<pre>{html.escape(out)}</pre>"
+    )
+
+
+@router.callback_query(F.data == "srv:resources")
+async def cb_srv_resources(cb: CallbackQuery) -> None:
+    await cb.answer()
+    try:
+        nodes = await node_provision.list_nodes()
+    except node_provision.ProvisionError as e:
+        await cb.message.answer(f"❌ Не смог получить список нод: {e}")
+        return
+    parts = []
+    try:
+        # df на "/" внутри контейнера показал бы overlay-файловую систему
+        # САМОГО контейнера, а не диск хоста. /app/data — bind-mount
+        # (см. docker-compose.yml), df на нём корректно отдаёт диск хоста.
+        proc = await asyncio.to_thread(
+            subprocess.run, ["sh", "-c", "free -h; echo '---DISK (хост)---'; df -h /app/data"],
+            capture_output=True, text=True, timeout=10,
+        )
+        parts.append(f"📊 <b>Мастер (этот сервер)</b>\n<pre>{html.escape(proc.stdout.strip())}</pre>")
+    except Exception:  # noqa: BLE001
+        log.exception("resources check on master failed")
+        parts.append("📊 <b>Мастер</b>: не смог проверить, см. логи")
+    for n in nodes:
+        try:
+            out = await ssh_ops.get_resources(n["address"])
+            parts.append(f"📊 <b>{html.escape(n.get('name', '?'))}</b>\n<pre>{html.escape(out)}</pre>")
+        except ssh_ops.SSHOpError as e:
+            parts.append(f"📊 <b>{html.escape(n.get('name', '?'))}</b>: {html.escape(str(e))}")
+    for part in parts:
+        await cb.message.answer(part)
 
 
 # =====================================================================

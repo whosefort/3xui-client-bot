@@ -48,29 +48,112 @@ def ensure_keypair() -> str:
         return f.read().strip()
 
 
+async def _connect(address: str, *, user: str = "root", port: int = 22, connect_timeout: float = 15.0):
+    ensure_keypair()
+    try:
+        return await asyncssh.connect(
+            address, port=port, username=user, client_keys=[_PRIVATE_KEY_PATH],
+            known_hosts=None, connect_timeout=connect_timeout,
+        )
+    except (asyncssh.Error, OSError) as e:
+        raise SSHOpError(f"SSH до {address} не удался: {e}") from e
+
+
 async def upgrade_node(address: str, xray_version: str, *, user: str = "root",
                        port: int = 22, timeout: float = 180.0) -> str:
     """Копирует содержимое node/upgrade_xray.sh на ноду через stdin и
     гоняет с нужным пином версии. Возвращает хвост вывода для отчёта
     админу. Кидает SSHOpError с текстом причины при любом сбое."""
-    ensure_keypair()
     with open(_UPGRADE_SCRIPT) as f:
         script = f.read()
 
+    conn = await _connect(address, user=user, port=port)
     try:
-        async with asyncssh.connect(
-            address, port=port, username=user, client_keys=[_PRIVATE_KEY_PATH],
-            known_hosts=None, connect_timeout=15,
-        ) as conn:
-            result = await asyncio.wait_for(
-                conn.run(f"XRAY_VERSION={xray_version} bash -s", input=script, check=False),
-                timeout=timeout,
-            )
+        result = await asyncio.wait_for(
+            conn.run(f"XRAY_VERSION={xray_version} bash -s", input=script, check=False),
+            timeout=timeout,
+        )
     except (asyncssh.Error, OSError, asyncio.TimeoutError) as e:
         raise SSHOpError(f"SSH до {address} не удался: {e}") from e
+    finally:
+        conn.close()
 
     tail = "\n".join((result.stdout or "").strip().splitlines()[-15:])
     if result.exit_status != 0:
         err_tail = "\n".join((result.stderr or "").strip().splitlines()[-5:])
         raise SSHOpError(f"exit={result.exit_status}\n{tail}\n{err_tail}".strip())
     return tail
+
+
+async def get_resources(address: str, *, user: str = "root", port: int = 22,
+                        timeout: float = 20.0) -> str:
+    """RAM + диск ноды по SSH — 'free -h' и 'df -h /', сырой вывод."""
+    conn = await _connect(address, user=user, port=port)
+    try:
+        result = await asyncio.wait_for(
+            conn.run("free -h; echo '---DISK---'; df -h /", check=False),
+            timeout=timeout,
+        )
+    except (asyncssh.Error, OSError, asyncio.TimeoutError) as e:
+        raise SSHOpError(f"SSH до {address} не удался: {e}") from e
+    finally:
+        conn.close()
+    if result.exit_status != 0:
+        raise SSHOpError(f"exit={result.exit_status}: {(result.stderr or '').strip()}")
+    return (result.stdout or "").strip()
+
+
+async def verify_reality_tunnel(address: str, client: dict, *, user: str = "root",
+                                port: int = 22, container: str = "marzban-node-marzban-node-1",
+                                timeout: float = 40.0) -> bool:
+    """Честная проверка REALITY прямо с ноды: запускает тестовый xray-клиент
+    ВНУТРИ marzban-node контейнером (network_mode: host — сокет виден с
+    хоста), гоняет через него запрос, убивает по PID на порту (не по имени
+    процесса — рядом всегда крутится боевой xray, его трогать нельзя).
+    `client` — словарь uuid/pbk/sid/sni/fp (см. node_provision.build_verify_client).
+    Возвращает True при http=204, иначе кидает SSHOpError с деталями."""
+    import json as _json
+
+    cfg = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [{"port": 19999, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
+        "outbounds": [{
+            "protocol": "vless",
+            "settings": {"vnext": [{"address": address, "port": 443, "users": [
+                {"id": client["uuid"], "encryption": "none", "flow": "xtls-rprx-vision"}
+            ]}]},
+            "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
+                "serverName": client["sni"], "fingerprint": client.get("fp") or "chrome",
+                "publicKey": client["pbk"], "shortId": client["sid"], "spiderX": "/",
+            }},
+        }],
+    }
+    remote_cfg = f"/var/lib/marzban-node/verify_client_{os.getpid()}.json"
+    conn = await _connect(address, user=user, port=port)
+    try:
+        put = await asyncio.wait_for(
+            conn.run(f"cat > {remote_cfg}", input=_json.dumps(cfg), check=False), timeout=15,
+        )
+        if put.exit_status != 0:
+            raise SSHOpError(f"не смог записать тестовый конфиг на ноду: {(put.stderr or '').strip()}")
+
+        script = (
+            f"cd /opt/marzban-node && "
+            f"docker compose exec -d marzban-node xray run -config '{remote_cfg}' && "
+            f"sleep 3 && "
+            f"curl --socks5-hostname 127.0.0.1:19999 -s -o /dev/null -w '%{{http_code}}' "
+            f"--max-time 10 https://www.gstatic.com/generate_204; "
+            f"PID=$(ss -tlnp 2>/dev/null | grep '127.0.0.1:19999' | grep -oE 'pid=[0-9]+' | cut -d= -f2); "
+            f"[ -n \"$PID\" ] && kill \"$PID\" 2>/dev/null; "
+            f"rm -f '{remote_cfg}'"
+        )
+        result = await asyncio.wait_for(conn.run(script, check=False), timeout=timeout)
+    except (asyncssh.Error, OSError, asyncio.TimeoutError) as e:
+        raise SSHOpError(f"SSH до {address} не удался: {e}") from e
+    finally:
+        conn.close()
+
+    code = (result.stdout or "").strip()
+    if code != "204":
+        raise SSHOpError(f"туннель не работает (http={code or 'нет ответа'})")
+    return True
