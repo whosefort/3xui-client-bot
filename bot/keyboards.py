@@ -287,8 +287,23 @@ def reality_menu_kb() -> InlineKeyboardMarkup:
     kb.button(text="🔄 Сменить SNI (домен)", callback_data="rl:sni")
     kb.button(text="🔍 Найти SNI-домены (скан)", callback_data="rl:scan")
     kb.button(text="🔑 Перегенерить ключи", callback_data="rl:keys")
-    kb.button(text="🆔 Перегенерить shortId", callback_data="rl:shortids")
+    kb.button(text="🆔 shortId (управление)", callback_data="rl:sids")
+    kb.button(text="🔌 Порт", callback_data="rl:port")
+    kb.button(text="🕸 SpiderX", callback_data="rl:spx")
     kb.button(text="✖️ Закрыть", callback_data="rl:close")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def reality_sids_kb(short_ids: list[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for sid in short_ids:
+        cb = f"rl:sidrm:{sid}"
+        if len(cb.encode()) <= 64:
+            kb.button(text=f"🗑 {sid}", callback_data=cb)
+    kb.button(text="➕ Добавить один", callback_data="rl:sidadd")
+    kb.button(text="♻️ Пересоздать все (рвёт всех разом)", callback_data="rl:shortids")
+    kb.button(text="✖️ Закрыть", callback_data="rl:menu")
     kb.adjust(1)
     return kb.as_markup()
 

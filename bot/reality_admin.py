@@ -71,12 +71,15 @@ async def get_settings() -> dict:
         token = await _marzban_auth(s)
         headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
         cfg = await _get_config(s, headers)
-    rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
+    inbound = _find_inbound(cfg)
+    rs = inbound["streamSettings"]["realitySettings"]
     return {
         "dest": rs.get("dest", ""),
         "server_names": rs.get("serverNames", []),
         "public_key": rs.get("publicKey", ""),
         "short_ids": rs.get("shortIds", []),
+        "port": inbound.get("port"),
+        "spx": rs.get("SpiderX", ""),
     }
 
 
@@ -249,6 +252,87 @@ async def regenerate_short_ids(count: int = 8) -> list[str]:
         rs["shortIds"] = ids
         await _put_config(s, headers, cfg)
     return ids
+
+
+async def add_short_id() -> str:
+    """Добавляет ОДИН shortId, не трогая остальные — мягкая ротация: новый
+    работает сразу, старые продолжают работать, пока их явно не убрали."""
+    new_id = secrets.token_hex(4)
+    async with config_lock, aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        cfg = await _get_config(s, headers)
+        rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
+        rs.setdefault("shortIds", []).append(new_id)
+        await _put_config(s, headers, cfg)
+
+        verify_cfg = await _get_config(s, headers)
+        verify_rs = _find_inbound(verify_cfg)["streamSettings"]["realitySettings"]
+        if new_id not in verify_rs.get("shortIds", []):
+            raise RealityError("после сохранения новый shortId не найден в конфиге")
+    return new_id
+
+
+async def remove_short_id(short_id: str) -> None:
+    async with config_lock, aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        cfg = await _get_config(s, headers)
+        rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
+        ids = rs.get("shortIds", [])
+        if short_id not in ids:
+            raise RealityError(f"shortId {short_id} не найден — список уже изменился")
+        if len(ids) <= 1:
+            raise RealityError("нельзя убрать последний shortId — REALITY требует хотя бы один")
+        ids.remove(short_id)
+        await _put_config(s, headers, cfg)
+
+        verify_cfg = await _get_config(s, headers)
+        verify_rs = _find_inbound(verify_cfg)["streamSettings"]["realitySettings"]
+        if short_id in verify_rs.get("shortIds", []):
+            raise RealityError("после сохранения shortId всё ещё в конфиге — не удалился")
+
+
+async def set_port(port: int) -> None:
+    """Порт REALITY-инбаунда на весь кластер. Hosts у нас port=null (см.
+    /api/hosts) — это значит «наследовать порт инбаунда», так что для
+    подписки ничего больше трогать не нужно. НО: порт на нодах открывает UFW
+    (см. node/bootstrap.sh, INBOUND_PORTS) — эта функция его не трогает,
+    новый порт на уже развёрнутых нодах нужно открыть в файрволе руками."""
+    if not (1 <= port <= 65535):
+        raise RealityError(f"порт {port} вне диапазона 1-65535")
+    async with config_lock, aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        cfg = await _get_config(s, headers)
+        inbound = _find_inbound(cfg)
+        inbound["port"] = port
+        await _put_config(s, headers, cfg)
+
+        verify_cfg = await _get_config(s, headers)
+        if _find_inbound(verify_cfg).get("port") != port:
+            raise RealityError("после сохранения порт в конфиге не совпадает с запрошенным")
+
+
+async def set_spx(value: str) -> None:
+    """SpiderX — путь в фейковом запросе к сайту-камуфляжу (часть
+    правдоподобия REALITY, см. app/xray/config.py в Marzban). Пустая строка
+    сбрасывает на дефолт (панель сама подставит '')."""
+    async with config_lock, aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        cfg = await _get_config(s, headers)
+        rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
+        if value:
+            rs["SpiderX"] = value
+        else:
+            rs.pop("SpiderX", None)
+        await _put_config(s, headers, cfg)
+
+        verify_cfg = await _get_config(s, headers)
+        verify_rs = _find_inbound(verify_cfg)["streamSettings"]["realitySettings"]
+        if verify_rs.get("SpiderX", "") != value:
+            raise RealityError("после сохранения SpiderX в конфиге не совпадает с запрошенным")
 
 
 def _probe_tls13(domain: str, port: int, timeout: float) -> dict:

@@ -23,7 +23,8 @@ from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
                          confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
-                         reality_menu_kb, reality_scan_results_kb, reality_sni_result_kb,
+                         reality_menu_kb, reality_scan_results_kb, reality_sids_kb,
+                         reality_sni_result_kb,
                          server_card_kb, server_fp_picker_kb, server_sni_picker_kb,
                          settings_kb, setup_start_kb, xray_upgrade_confirm_kb)
 from ..panels.base import Client
@@ -58,6 +59,8 @@ class AdminFSM(StatesGroup):
     server_sni_scan = State()    # ждём цель скана для персонального SNI одной ноды
     reality_sni = State()        # ждём домен для смены SNI
     reality_scan = State()       # ждём цель (IP/CIDR/домен) для скана RealiTLScanner
+    reality_port = State()       # ждём новый порт REALITY-инбаунда
+    reality_spx = State()        # ждём новый SpiderX-путь
 
 
 # ---------- форматирование ----------
@@ -1536,12 +1539,15 @@ async def _reality_menu_text() -> str:
     except reality_admin.RealityError as e:
         return f"❌ Не удалось получить настройки: {e}"
     sni = ", ".join(s["server_names"]) or "—"
+    spx_line = f"SpiderX: <code>{html.escape(s['spx'])}</code>" if s["spx"] else "SpiderX: не задан"
     return (
         f"🛡 <b>Соединение (REALITY)</b>\n"
         f"Камуфляж (SNI): <code>{html.escape(sni)}</code>\n"
         f"dest: <code>{html.escape(s['dest'])}</code>\n"
+        f"Порт: <b>{s['port']}</b>\n"
         f"publicKey: <code>{html.escape(s['public_key'])}</code>\n"
-        f"shortId: <b>{len(s['short_ids'])}</b> шт.\n\n"
+        f"shortId: <b>{len(s['short_ids'])}</b> шт.\n"
+        f"{spx_line}\n\n"
         f"Правки применяются сразу на весь кластер (общий конфиг), без "
         f"грейс-периода — старые ключи/shortId перестают работать немедленно. "
         f"Подписка генерируется на лету, отдельно рассылать новые ссылки не надо."
@@ -1733,6 +1739,134 @@ async def cb_rl_go(cb: CallbackQuery) -> None:
     except Exception:  # noqa: BLE001
         log.exception("reality action %s failed", action)
         await cb.message.answer("❌ Ошибка при обращении к панели. См. логи.")
+
+
+# ---------- shortId: точечное управление ----------
+
+async def _show_sids(message: Message) -> None:
+    try:
+        s = await reality_admin.get_settings()
+    except reality_admin.RealityError as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        return
+    ids = s["short_ids"]
+    await message.answer(
+        f"🆔 shortId сейчас: <b>{len(ids)}</b> шт.\n"
+        f"Тапни по конкретному, чтобы убрать его один (остальные не тронет), "
+        f"или добавь новый.",
+        reply_markup=reality_sids_kb(ids),
+    )
+
+
+@router.callback_query(F.data == "rl:sids")
+async def cb_rl_sids(cb: CallbackQuery) -> None:
+    await _show_sids(cb.message)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "rl:sidadd")
+async def cb_rl_sidadd(cb: CallbackQuery) -> None:
+    await cb.answer()
+    try:
+        new_id = await reality_admin.add_short_id()
+    except reality_admin.RealityError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("cb_rl_sidadd failed")
+        await cb.message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    await cb.message.answer(f"✅ Добавлен shortId <code>{html.escape(new_id)}</code>, остальные не тронуты.")
+    await _show_sids(cb.message)
+
+
+@router.callback_query(F.data.startswith("rl:sidrm:"))
+async def cb_rl_sidrm(cb: CallbackQuery) -> None:
+    short_id = cb.data.split(":", 2)[2]
+    await cb.answer()
+    try:
+        await reality_admin.remove_short_id(short_id)
+    except reality_admin.RealityError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("cb_rl_sidrm failed")
+        await cb.message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    await cb.message.answer(f"✅ shortId <code>{html.escape(short_id)}</code> убран.")
+    await _show_sids(cb.message)
+
+
+# ---------- порт REALITY-инбаунда ----------
+
+@router.callback_query(F.data == "rl:port")
+async def cb_rl_port(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminFSM.reality_port)
+    await cb.message.answer(
+        "🔌 Пришли новый порт (число 1-65535).\n\n"
+        "⚠️ Меняет порт на весь кластер сразу, но <b>UFW на уже развёрнутых "
+        "нодах эта команда не трогает</b> — новый порт там нужно открыть "
+        "руками (node/bootstrap.sh, INBOUND_PORTS), иначе клиенты просто не "
+        "достучатся до ноды по новому порту.\n"
+        "Отмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.reality_port, F.text)
+async def reality_port_input(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Не похоже на число. Отменено.")
+        return
+    port = int(text)
+    try:
+        await reality_admin.set_port(port)
+    except reality_admin.RealityError as e:
+        await message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("reality_port_input failed")
+        await message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    await message.answer(
+        f"✅ Порт теперь <b>{port}</b>. Не забудь открыть его в UFW на всех "
+        f"уже развёрнутых нодах."
+    )
+
+
+# ---------- SpiderX ----------
+
+@router.callback_query(F.data == "rl:spx")
+async def cb_rl_spx(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminFSM.reality_spx)
+    await cb.message.answer(
+        "🕸 Пришли новый SpiderX-путь (например <code>/url</code>) — "
+        "путь в фейковом запросе к сайту-камуфляжу, часть правдоподобия "
+        "REALITY. Пустое сообщение (пробел) сбрасывает на дефолт.\n"
+        "Отмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.reality_spx, F.text)
+async def reality_spx_input(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    value = (message.text or "").strip()
+    try:
+        await reality_admin.set_spx(value)
+    except reality_admin.RealityError as e:
+        await message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("reality_spx_input failed")
+        await message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    if value:
+        await message.answer(f"✅ SpiderX теперь <code>{html.escape(value)}</code>.")
+    else:
+        await message.answer("✅ SpiderX сброшен на дефолт.")
 
 
 # ---------- утилиты ----------
