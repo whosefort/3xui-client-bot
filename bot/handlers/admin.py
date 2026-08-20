@@ -1571,11 +1571,29 @@ async def cb_rl_menu(cb: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data == "rl:sni")
-async def cb_rl_sni(cb: CallbackQuery, state: FSMContext) -> None:
+async def cb_rl_sni(cb: CallbackQuery) -> None:
+    await cb.answer()
+    await cb.message.answer("🔄 Проверяю варианты…")
+    validated = await reality_admin.validate_candidates(reality_admin.SUGGESTED_DOMAINS)
+    if not validated:
+        await cb.message.answer(
+            "Ни один из обычных вариантов сейчас не прошёл проверку — "
+            "введи домен вручную или запусти скан.",
+            reply_markup=reality_scan_results_kb([], show_scan=True),
+        )
+        return
+    await cb.message.answer(
+        "🔄 Прошли проверку прямо сейчас — выбери новый SNI-камуфляж:",
+        reply_markup=reality_scan_results_kb(validated, show_scan=True),
+    )
+
+
+@router.callback_query(F.data == "rl:snimanual")
+async def cb_rl_snimanual(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminFSM.reality_sni)
     await cb.message.answer(
-        "🔄 Пришли новый домен-камуфляж (например <code>dl.google.com</code>) — "
-        "без https:// и порта. Проверю TLS1.3/серт перед применением.\n"
+        "Пришли домен текстом (например <code>dl.google.com</code>), без "
+        "https:// и порта. Проверю TLS1.3/серт перед применением.\n"
         "Отмена — любая кнопка снизу."
     )
     await cb.answer()
@@ -1673,7 +1691,7 @@ async def reality_scan_input(message: Message, state: FSMContext) -> None:
     lines = [f"• <code>{html.escape(r['domain'])}</code> ({html.escape(r['geo'] or '—')})" for r in results]
     await message.answer(
         "🔍 Нашёл кандидатов:\n" + "\n".join(lines) + "\n\nВыбери, чтобы проверить и применить:",
-        reply_markup=reality_scan_results_kb([r["domain"] for r in results]),
+        reply_markup=reality_scan_results_kb([r["domain"] for r in results], show_scan=True),
     )
 
 

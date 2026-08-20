@@ -312,12 +312,15 @@ def reality_sni_result_kb(ok: bool) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def reality_scan_results_kb(domains: list[str]) -> InlineKeyboardMarkup:
+def reality_scan_results_kb(domains: list[str], show_scan: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for d in domains:
         cb = f"rl:pick:{d}"
         if len(cb.encode()) <= 64:
             kb.button(text=d, callback_data=cb)
+    if show_scan:
+        kb.button(text="🔍 Просканировать ещё", callback_data="rl:scan")
+    kb.button(text="✏️ Свой домен", callback_data="rl:snimanual")
     kb.button(text="✖️ Отмена", callback_data="rl:menu")
     kb.adjust(1)
     return kb.as_markup()

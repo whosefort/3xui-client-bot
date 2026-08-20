@@ -13,7 +13,7 @@ from __future__ import annotations
 import secrets
 import socket
 import ssl
-from asyncio import to_thread
+from asyncio import gather, to_thread
 from base64 import urlsafe_b64encode
 
 import aiohttp
@@ -96,6 +96,18 @@ async def set_sni(domain: str, port: int = _DEFAULT_PORT) -> None:
         rs["dest"] = f"{domain}:{port}"
         rs["serverNames"] = [domain]
         await _put_config(s, headers, cfg)
+
+        # Перечитываем и сверяем — PUT мог отдать 200, но не факт, что панель
+        # реально сохранила именно то, что просили (гонка с другим
+        # админ-действием мимо нашего лока, молчаливое отбрасывание поля и т.п.).
+        # Лучше явная ошибка здесь, чем тихий ложный «✅ Применено».
+        verify_cfg = await _get_config(s, headers)
+        verify_rs = _find_inbound(verify_cfg)["streamSettings"]["realitySettings"]
+        if verify_rs.get("dest") != f"{domain}:{port}" or domain not in verify_rs.get("serverNames", []):
+            raise RealityError(
+                f"после сохранения панель отдаёт другое значение (dest={verify_rs.get('dest')!r}, "
+                f"serverNames={verify_rs.get('serverNames')!r}) — применилось не то, что просили"
+            )
 
         async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
             hosts = await r.json(content_type=None)
@@ -275,3 +287,13 @@ async def check_sni_candidate(domain: str, port: int = _DEFAULT_PORT, timeout: f
     применения — плохой выбор (не TLS1.3, самоподписанный серт) ломает
     хендшейк для всех клиентов сразу, лучше поймать здесь."""
     return await to_thread(_probe_tls13, domain, port, timeout)
+
+
+async def validate_candidates(domains: list[str]) -> list[str]:
+    """Прогоняет check_sni_candidate по всем сразу (параллельно) и возвращает
+    только те, что реально прошли — не предлагаем в пикере то, что уже не
+    годится. Список короткий (обычно SUGGESTED_DOMAINS, ~6 штук) — намеренно
+    не масштабируем на произвольные объёмы: пара TLS-хендшейков с мастера на
+    известные публичные сайты не выглядит сканом, десятки/сотни — уже похоже."""
+    results = await gather(*(check_sni_candidate(d) for d in domains), return_exceptions=True)
+    return [d for d, r in zip(domains, results) if isinstance(r, dict) and r.get("ok")]
