@@ -215,13 +215,20 @@ async def create_verify_client() -> dict | None:
     if not links:
         raise ProvisionError("панель не вернула ссылку для тестового юзера")
     q = dict(parse_qsl(urlparse(links[0]).query))
+    # "randomized" — валиден только для Host.fingerprint (вид ссылки), не для
+    # настоящего xray-клиента: тому нужно конкретное имя uTLS-профиля,
+    # иначе хендшейк молча не собирается (curl отдаёт 000, без объяснений
+    # — на этом словили баг при первом прогоне честной проверки).
+    fp = q.get("fp") or "chrome"
+    if fp not in ("chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq"):
+        fp = "chrome"
     return {
         "username": username,
         "uuid": client_id,
         "pbk": q.get("pbk"),
         "sid": q.get("sid"),
         "sni": q.get("sni"),
-        "fp": q.get("fp") or "chrome",
+        "fp": fp,
     }
 
 
