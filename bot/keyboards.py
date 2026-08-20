@@ -282,7 +282,7 @@ def server_fp_picker_kb(key: str, options: list[str], current: str) -> InlineKey
     return kb.as_markup()
 
 
-def reality_menu_kb() -> InlineKeyboardMarkup:
+def reality_menu_kb(ru_block_on: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🔄 Сменить SNI (домен)", callback_data="rl:sni")
     kb.button(text="🔍 Найти SNI-домены (скан)", callback_data="rl:scan")
@@ -290,6 +290,10 @@ def reality_menu_kb() -> InlineKeyboardMarkup:
     kb.button(text="🆔 shortId (управление)", callback_data="rl:sids")
     kb.button(text="🔌 Порт", callback_data="rl:port")
     kb.button(text="🕸 SpiderX", callback_data="rl:spx")
+    kb.button(
+        text=("🇷🇺 Блок .ru/.su на ноде: выключить" if ru_block_on else "🇷🇺 Блок .ru/.su на ноде: включить"),
+        callback_data="rl:rublocktoggle",
+    )
     kb.button(text="✖️ Закрыть", callback_data="rl:close")
     kb.adjust(1)
     return kb.as_markup()

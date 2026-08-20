@@ -1533,25 +1533,29 @@ async def cb_srv_xrayupgo(cb: CallbackQuery) -> None:
 #  СОЕДИНЕНИЕ (SNI-камуфляж, ключи, shortId REALITY)
 # =====================================================================
 
-async def _reality_menu_text() -> str:
+async def _reality_menu_text() -> tuple[str, bool]:
     try:
         s = await reality_admin.get_settings()
+        ru_block_on = await reality_admin.get_ru_block_enabled()
     except reality_admin.RealityError as e:
-        return f"❌ Не удалось получить настройки: {e}"
+        return f"❌ Не удалось получить настройки: {e}", False
     sni = ", ".join(s["server_names"]) or "—"
     spx_line = f"SpiderX: <code>{html.escape(s['spx'])}</code>" if s["spx"] else "SpiderX: не задан"
-    return (
+    ru_line = "Блок .ru/.su на ноде: включён" if ru_block_on else "Блок .ru/.su на ноде: выключен"
+    text = (
         f"🛡 <b>Соединение (REALITY)</b>\n"
         f"Камуфляж (SNI): <code>{html.escape(sni)}</code>\n"
         f"dest: <code>{html.escape(s['dest'])}</code>\n"
         f"Порт: <b>{s['port']}</b>\n"
         f"publicKey: <code>{html.escape(s['public_key'])}</code>\n"
         f"shortId: <b>{len(s['short_ids'])}</b> шт.\n"
-        f"{spx_line}\n\n"
+        f"{spx_line}\n"
+        f"{ru_line}\n\n"
         f"Правки применяются сразу на весь кластер (общий конфиг), без "
         f"грейс-периода — старые ключи/shortId перестают работать немедленно. "
         f"Подписка генерируется на лету, отдельно рассылать новые ссылки не надо."
     )
+    return text, ru_block_on
 
 
 @router.message(F.text == kb.ADM_REALITY)
@@ -1560,7 +1564,8 @@ async def kb_reality(message: Message, state: FSMContext) -> None:
     if not _servers_available():
         await message.answer("Недоступно: нужен PANEL_BACKEND=marzban.")
         return
-    await message.answer(await _reality_menu_text(), reply_markup=reality_menu_kb())
+    text, ru_block_on = await _reality_menu_text()
+    await message.answer(text, reply_markup=reality_menu_kb(ru_block_on))
 
 
 @router.callback_query(F.data == "rl:close")
@@ -1572,7 +1577,26 @@ async def cb_rl_close(cb: CallbackQuery) -> None:
 @router.callback_query(F.data == "rl:menu")
 async def cb_rl_menu(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await cb.message.edit_text(await _reality_menu_text(), reply_markup=reality_menu_kb())
+    text, ru_block_on = await _reality_menu_text()
+    await cb.message.edit_text(text, reply_markup=reality_menu_kb(ru_block_on))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "rl:rublocktoggle")
+async def cb_rl_rublocktoggle(cb: CallbackQuery) -> None:
+    await cb.answer()
+    try:
+        current = await reality_admin.get_ru_block_enabled()
+        await reality_admin.set_ru_block(not current)
+    except reality_admin.RealityError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("cb_rl_rublocktoggle failed")
+        await cb.message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    text, ru_block_on = await _reality_menu_text()
+    await cb.message.edit_text(text, reply_markup=reality_menu_kb(ru_block_on))
     await cb.answer()
 
 

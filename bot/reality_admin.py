@@ -44,6 +44,50 @@ class RealityError(Exception):
     pass
 
 
+# Серверное правило "не пускать .ru/.su через ноду" (доп. страховка поверх
+# клиентского Happ-профиля roscomvpn-routing — тот тоже уводит RU-сайты в
+# обход VPN, но только если клиент реально применил профиль). Тут — жёсткий
+# blackhole на уровне самой ноды, независимо от клиента. Правило узнаём по
+# точному списку доменов + outboundTag, чтобы тоггл был идемпотентным.
+_RU_BLOCK_DOMAINS = ["geosite:category-ru", "regexp:.*\\.ru$", "regexp:.*\\.su$"]
+
+
+def _find_ru_block_rule(cfg: dict) -> dict | None:
+    for rule in cfg.get("routing", {}).get("rules", []):
+        if rule.get("domain") == _RU_BLOCK_DOMAINS and rule.get("outboundTag") == "BLOCK":
+            return rule
+    return None
+
+
+async def get_ru_block_enabled() -> bool:
+    async with aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        cfg = await _get_config(s, headers)
+    return _find_ru_block_rule(cfg) is not None
+
+
+async def set_ru_block(enabled: bool) -> None:
+    async with config_lock, aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        cfg = await _get_config(s, headers)
+        rules = cfg.setdefault("routing", {}).setdefault("rules", [])
+        existing = _find_ru_block_rule(cfg)
+        if enabled and not existing:
+            rules.append({"type": "field", "domain": list(_RU_BLOCK_DOMAINS), "outboundTag": "BLOCK"})
+        elif not enabled and existing:
+            rules.remove(existing)
+        else:
+            return  # уже в нужном состоянии, лишний PUT не нужен
+        await _put_config(s, headers, cfg)
+
+        verify_cfg = await _get_config(s, headers)
+        now_enabled = _find_ru_block_rule(verify_cfg) is not None
+        if now_enabled != enabled:
+            raise RealityError("после сохранения состояние правила не совпадает с запрошенным")
+
+
 def _find_inbound(cfg: dict) -> dict:
     for ib in cfg.get("inbounds", []):
         if ib.get("streamSettings", {}).get("security") == "reality":
@@ -160,12 +204,13 @@ async def set_host_fragment(tag: str, index: int, enabled: bool) -> None:
                 raise RealityError(f"не смог сохранить fragment ({r.status}): {res}")
 
 
-# Marzban ProxyHostFingerprint enum. "randomized" — сам xray на КАЖДОМ
-# соединении берёт случайный отпечаток из набора, а не один статичный на
-# всю ноду — сильнее ручной раскидки по нодам (та фиксирована и тоже в
-# итоге фингерпринтится, просто на уровне "одна нода = один fp"). Дефолт
-# для всех хостов, если явно не задано другое.
-FINGERPRINT_OPTIONS = ["randomized", "chrome", "firefox", "safari", "ios", "android", "edge"]
+# Marzban ProxyHostFingerprint enum, без "android" — по опыту рунета это
+# конкретно тот отпечаток, который чаще палится (андроид-стек TLS менее
+# распространён среди обычного веб-трафика, выделяется на общем фоне).
+# "randomized" — сам xray на КАЖДОМ соединении берёт случайный отпечаток из
+# набора, а не один статичный на всю ноду — сильнее ручной раскидки по
+# нодам. Дефолт для всех хостов, если явно не задано другое.
+FINGERPRINT_OPTIONS = ["randomized", "chrome", "firefox", "safari", "edge"]
 
 
 async def set_host_fingerprint(tag: str, index: int, fp: str) -> None:
@@ -335,6 +380,30 @@ async def set_spx(value: str) -> None:
             raise RealityError("после сохранения SpiderX в конфиге не совпадает с запрошенным")
 
 
+def _check_redirect(tls: ssl.SSLSocket, domain: str, timeout: float) -> str | None:
+    """Тянет '/' по уже открытому TLS-сокету и смотрит статус-код. Редирект
+    с главной — минус к правдоподобию камуфляжа (реальные сайты обычно
+    отвечают 200 на свою же главную). Только для http/1.1 — h2 бинарный,
+    руками не распарсить без отдельной библиотеки, тогда просто не проверяем."""
+    try:
+        tls.settimeout(timeout)
+        tls.sendall(
+            f"GET / HTTP/1.1\r\nHost: {domain}\r\nConnection: close\r\nUser-Agent: Mozilla/5.0\r\n\r\n".encode()
+        )
+        status_line = b""
+        while b"\r\n" not in status_line and len(status_line) < 256:
+            chunk = tls.recv(256)
+            if not chunk:
+                break
+            status_line += chunk
+        first_line = status_line.split(b"\r\n", 1)[0].decode(errors="replace")
+        parts = first_line.split(maxsplit=2)
+        code = parts[1] if len(parts) > 1 else ""
+        return code if code.startswith("3") else None
+    except (OSError, ssl.SSLError, UnicodeDecodeError):
+        return None  # не смогли проверить — не блокируем кандидата из-за этого
+
+
 def _probe_tls13(domain: str, port: int, timeout: float) -> dict:
     """Блокирующая часть — гоняется через to_thread. Настоящий TLS1.3-хендшейк
     с проверкой сертификата (не self-signed, реальный CA) — REALITY-камуфляж
@@ -343,12 +412,15 @@ def _probe_tls13(domain: str, port: int, timeout: float) -> dict:
     ctx = ssl.create_default_context()
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.set_alpn_protocols(["h2", "http/1.1"])
+    redirect_code = None
     try:
         with socket.create_connection((domain, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=domain) as tls:
                 version = tls.version()
                 alpn = tls.selected_alpn_protocol()
                 cert = tls.getpeercert()
+                if alpn != "h2":
+                    redirect_code = _check_redirect(tls, domain, timeout)
     except ssl.SSLCertVerificationError as e:
         return {"ok": False, "reason": f"серт не прошёл проверку: {e.verify_message}"}
     except (ssl.SSLError, socket.error, OSError) as e:
@@ -356,6 +428,8 @@ def _probe_tls13(domain: str, port: int, timeout: float) -> dict:
 
     if version != "TLSv1.3":
         return {"ok": False, "reason": f"домен ответил {version}, а не TLS 1.3 — REALITY не пройдёт"}
+    if redirect_code:
+        return {"ok": False, "reason": f"главная страница редиректит (HTTP {redirect_code}) — не похоже на честный сайт"}
 
     issuer = dict(x[0] for x in cert.get("issuer", [])) if cert else {}
     return {
