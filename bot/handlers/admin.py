@@ -24,7 +24,8 @@ from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
                          confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
-                         reality_fp_picker_kb, reality_menu_kb, reality_scan_results_kb, reality_sids_kb,
+                         reality_fp_picker_kb, reality_menu_kb, reality_port_picker_kb,
+                         reality_scan_results_kb, reality_sids_kb, reality_spx_picker_kb,
                          reality_sni_result_kb,
                          server_card_kb, server_fp_picker_kb, server_sni_picker_kb,
                          settings_kb, setup_start_kb, xray_upgrade_confirm_kb)
@@ -1960,17 +1961,50 @@ async def cb_rl_sidrm(cb: CallbackQuery) -> None:
 
 # ---------- порт REALITY-инбаунда ----------
 
-@router.callback_query(F.data == "rl:port")
-async def cb_rl_port(cb: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(AdminFSM.reality_port)
-    await cb.message.answer(
-        "🔌 Пришли новый порт (число 1-65535).\n\n"
-        "⚠️ Меняет порт на весь кластер сразу, но <b>UFW на уже развёрнутых "
-        "нодах эта команда не трогает</b> — новый порт там нужно открыть "
-        "руками (node/bootstrap.sh, INBOUND_PORTS), иначе клиенты просто не "
-        "достучатся до ноды по новому порту.\n"
-        "Отмена — любая кнопка снизу."
+_PORT_WARNING = (
+    "⚠️ Меняет порт на весь кластер сразу, но <b>UFW на уже развёрнутых "
+    "нодах эта команда не трогает</b> — новый порт там нужно открыть "
+    "руками (node/bootstrap.sh, INBOUND_PORTS), иначе клиенты просто не "
+    "достучатся до ноды по новому порту."
+)
+
+
+async def _apply_port(message: Message, port: int) -> None:
+    try:
+        await reality_admin.set_port(port)
+    except reality_admin.RealityError as e:
+        await message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("_apply_port failed")
+        await message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    await message.answer(
+        f"✅ Порт теперь <b>{port}</b>. Не забудь открыть его в UFW на всех "
+        f"уже развёрнутых нодах."
     )
+
+
+@router.callback_query(F.data == "rl:port")
+async def cb_rl_port(cb: CallbackQuery) -> None:
+    await cb.message.answer(
+        f"🔌 Выбери порт или впиши свой.\n\n{_PORT_WARNING}",
+        reply_markup=reality_port_picker_kb(reality_admin.SUGGESTED_PORTS),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("rl:portpick:"))
+async def cb_rl_portpick(cb: CallbackQuery) -> None:
+    port = int(cb.data.split(":", 2)[2])
+    await cb.answer()
+    await _apply_port(cb.message, port)
+
+
+@router.callback_query(F.data == "rl:portmanual")
+async def cb_rl_portmanual(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminFSM.reality_port)
+    await cb.message.answer("Пришли порт текстом (число 1-65535).\nОтмена — любая кнопка снизу.")
     await cb.answer()
 
 
@@ -1981,32 +2015,56 @@ async def reality_port_input(message: Message, state: FSMContext) -> None:
     if not text.isdigit():
         await message.answer("Не похоже на число. Отменено.")
         return
-    port = int(text)
-    try:
-        await reality_admin.set_port(port)
-    except reality_admin.RealityError as e:
-        await message.answer(f"❌ Не удалось: {e}")
-        return
-    except Exception:  # noqa: BLE001
-        log.exception("reality_port_input failed")
-        await message.answer("❌ Ошибка при обращении к панели. См. логи.")
-        return
-    await message.answer(
-        f"✅ Порт теперь <b>{port}</b>. Не забудь открыть его в UFW на всех "
-        f"уже развёрнутых нодах."
-    )
+    await _apply_port(message, int(text))
 
 
 # ---------- SpiderX ----------
 
+async def _apply_spx(message: Message, value: str) -> None:
+    try:
+        await reality_admin.set_spx(value)
+    except reality_admin.RealityError as e:
+        await message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("_apply_spx failed")
+        await message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    if value:
+        await message.answer(f"✅ SpiderX теперь <code>{html.escape(value)}</code>.")
+    else:
+        await message.answer("✅ SpiderX сброшен на дефолт.")
+
+
 @router.callback_query(F.data == "rl:spx")
-async def cb_rl_spx(cb: CallbackQuery, state: FSMContext) -> None:
+async def cb_rl_spx(cb: CallbackQuery) -> None:
+    await cb.message.answer(
+        "🕸 Путь в фейковом запросе к сайту-камуфляжу — выбери, накинь "
+        "случайный или впиши свой.",
+        reply_markup=reality_spx_picker_kb(reality_admin.SPX_SUGGESTIONS),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("rl:spxpick:"))
+async def cb_rl_spxpick(cb: CallbackQuery) -> None:
+    path = cb.data.split(":", 2)[2]
+    await cb.answer()
+    await _apply_spx(cb.message, path)
+
+
+@router.callback_query(F.data == "rl:spxrandom")
+async def cb_rl_spxrandom(cb: CallbackQuery) -> None:
+    await cb.answer()
+    await _apply_spx(cb.message, reality_admin.random_spx())
+
+
+@router.callback_query(F.data == "rl:spxmanual")
+async def cb_rl_spxmanual(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminFSM.reality_spx)
     await cb.message.answer(
-        "🕸 Пришли новый SpiderX-путь (например <code>/url</code>) — "
-        "путь в фейковом запросе к сайту-камуфляжу, часть правдоподобия "
-        "REALITY. Пустое сообщение (пробел) сбрасывает на дефолт.\n"
-        "Отмена — любая кнопка снизу."
+        "Пришли SpiderX-путь текстом (например <code>/url</code>). Пустое "
+        "сообщение (пробел) сбрасывает на дефолт.\nОтмена — любая кнопка снизу."
     )
     await cb.answer()
 
@@ -2014,20 +2072,7 @@ async def cb_rl_spx(cb: CallbackQuery, state: FSMContext) -> None:
 @router.message(AdminFSM.reality_spx, F.text)
 async def reality_spx_input(message: Message, state: FSMContext) -> None:
     await state.clear()
-    value = (message.text or "").strip()
-    try:
-        await reality_admin.set_spx(value)
-    except reality_admin.RealityError as e:
-        await message.answer(f"❌ Не удалось: {e}")
-        return
-    except Exception:  # noqa: BLE001
-        log.exception("reality_spx_input failed")
-        await message.answer("❌ Ошибка при обращении к панели. См. логи.")
-        return
-    if value:
-        await message.answer(f"✅ SpiderX теперь <code>{html.escape(value)}</code>.")
-    else:
-        await message.answer("✅ SpiderX сброшен на дефолт.")
+    await _apply_spx(message, (message.text or "").strip())
 
 
 # ---------- фингерпринт разом на все ноды ----------

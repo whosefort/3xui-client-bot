@@ -39,6 +39,25 @@ SUGGESTED_DOMAINS = [
     "www.speedtest.net",
 ]
 
+# Готовые порты, которые Cloudflare проксирует без доп. настройки (см.
+# node/README.md) — не единственно верные, просто безопасный выбор, чтобы
+# не гадать вслепую, какой номер вообще имеет смысл.
+SUGGESTED_PORTS = [443, 8443, 2053, 2083, 2087, 2096]
+
+# Затравка для SpiderX — путь в фейковом запросе к сайту-камуфляжу. Формат
+# сам по себе не строгий (любая строка с /), но чтобы не мигать одним "/" на
+# весь флот, есть из чего выбрать/накидать случайно.
+SPX_SUGGESTIONS = ["/", "/url", "/search", "/news", "/images", "/account", "/help", "/about"]
+
+
+def random_spx() -> str:
+    """Не просто рандом из SPX_SUGGESTIONS — иногда собирает похожий на
+    реальный путь слаг, чтобы не повторять один и тот же список раз за разом."""
+    if secrets.randbelow(2) == 0:
+        return secrets.choice(SPX_SUGGESTIONS)
+    segments = ["api", "static", "assets", "cdn", "v1", "public", "media", "content"]
+    return "/" + secrets.choice(segments) + "/" + secrets.token_hex(3)
+
 
 class RealityError(Exception):
     pass

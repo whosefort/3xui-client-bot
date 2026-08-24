@@ -296,6 +296,27 @@ def reality_fp_picker_kb(options: list[str]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def reality_spx_picker_kb(options: list[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for path in options:
+        kb.button(text=path, callback_data=f"rl:spxpick:{path}")
+    kb.button(text="🎲 Случайный", callback_data="rl:spxrandom")
+    kb.button(text="✏️ Свой путь", callback_data="rl:spxmanual")
+    kb.button(text="✖️ Отмена", callback_data="rl:menu")
+    kb.adjust(2, 2, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def reality_port_picker_kb(options: list[int]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for port in options:
+        kb.button(text=str(port), callback_data=f"rl:portpick:{port}")
+    kb.button(text="✏️ Свой порт", callback_data="rl:portmanual")
+    kb.button(text="✖️ Отмена", callback_data="rl:menu")
+    kb.adjust(3, 3, 1, 1)
+    return kb.as_markup()
+
+
 def reality_menu_kb(ru_block_on: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🔄 Сменить SNI (домен)", callback_data="rl:sni")
