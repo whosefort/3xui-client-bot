@@ -531,7 +531,8 @@ async def cb_cli_bind(cb: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(bind_email=email)
     await cb.message.answer(
         f"🆔 Пришлите <b>tg_id</b>, который привязать к клиенту "
-        f"<code>{html.escape(email)}</code>. Для отмены — любая кнопка снизу."
+        f"<code>{html.escape(email)}</code>.\n"
+        f"Узнать id можно у @userinfobot. Для отмены — любая кнопка снизу."
     )
     await cb.answer()
 
