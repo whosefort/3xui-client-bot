@@ -24,6 +24,28 @@ G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; NC='\033[0m'
 ok(){ echo -e "${G}✓${NC} $*"; }; warn(){ echo -e "${Y}⚠${NC}  $*"; }
 die(){ echo -e "${R}✗${NC} $*" >&2; exit 1; }
 
+# Релизы XTLS/Xray-core публикуют .dgst рядом с каждым zip — сверяем sha256,
+# иначе подмена бинарника (взломанный релиз/угнанный GH Actions токен/hijack
+# редиректа) молча ставится вместо честного xray-core, а это процесс,
+# терминирующий живой REALITY-трафик всех клиентов ноды. Если .dgst недоступен
+# (сеть/смена формата релиза) — не блокируем апгрейд, только предупреждаем.
+_verify_xray_zip(){
+  local zip="$1" url="$2" dgst expected actual
+  dgst="$(curl -fsSL --max-time 20 "${url}.dgst" 2>/dev/null || true)"
+  if [ -z "$dgst" ]; then
+    warn "Релиз без .dgst — качаю без проверки контрольной суммы."
+    return 0
+  fi
+  expected="$(echo "$dgst" | awk '/SHA2-256/{print $2}')"
+  if [ -z "$expected" ]; then
+    warn "Не смог разобрать .dgst — качаю без проверки контрольной суммы."
+    return 0
+  fi
+  actual="$(sha256sum "$zip" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] || die "Контрольная сумма xray.zip не совпадает с релизом XTLS (ожидали $expected, получили $actual) — возможна подмена бинарника."
+  ok "Контрольная сумма xray.zip подтверждена (sha256)."
+}
+
 [ "$(id -u)" -eq 0 ] || die "Запускай под root."
 
 CONTAINER="${CONTAINER:-marzban-node-marzban-node-1}"
@@ -51,6 +73,7 @@ trap 'rm -rf -- "$TMPDIR"' EXIT
 URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
 echo "Качаю $URL …"
 curl -fsSL --max-time 90 -o "$TMPDIR/xray.zip" "$URL" || die "Скачать не удалось — версия $XRAY_VERSION существует? (проверь https://github.com/XTLS/Xray-core/releases)"
+_verify_xray_zip "$TMPDIR/xray.zip" "$URL"
 
 command -v unzip >/dev/null 2>&1 || apt-get install -y unzip -qq >/dev/null 2>&1
 unzip -o "$TMPDIR/xray.zip" -d "$TMPDIR/extracted" >/dev/null

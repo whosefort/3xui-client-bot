@@ -19,6 +19,28 @@ G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; NC='\033[0m'
 ok(){ echo -e "${G}✓${NC} $*"; }; warn(){ echo -e "${Y}⚠${NC}  $*"; }
 die(){ echo -e "${R}✗${NC} $*" >&2; exit 1; }
 
+# Релизы XTLS/Xray-core публикуют .dgst рядом с каждым zip — сверяем sha256,
+# иначе подмена бинарника (взломанный релиз/угнанный GH Actions токен/hijack
+# редиректа) молча ставится вместо честного xray-core, а это процесс,
+# терминирующий живой REALITY-трафик всех клиентов ноды. Если .dgst недоступен
+# (сеть/смена формата релиза) — не блокируем установку, только предупреждаем.
+_verify_xray_zip(){
+  local zip="$1" url="$2" dgst expected actual
+  dgst="$(curl -fsSL --max-time 20 "${url}.dgst" 2>/dev/null || true)"
+  if [ -z "$dgst" ]; then
+    warn "Релиз без .dgst — качаю без проверки контрольной суммы."
+    return 0
+  fi
+  expected="$(echo "$dgst" | awk '/SHA2-256/{print $2}')"
+  if [ -z "$expected" ]; then
+    warn "Не смог разобрать .dgst — качаю без проверки контрольной суммы."
+    return 0
+  fi
+  actual="$(sha256sum "$zip" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] || die "Контрольная сумма xray.zip не совпадает с релизом XTLS (ожидали $expected, получили $actual) — возможна подмена бинарника."
+  ok "Контрольная сумма xray.zip подтверждена (sha256)."
+}
+
 [ "$(id -u)" -eq 0 ] || die "Запускай под root."
 command -v apt-get >/dev/null 2>&1 || die "Только Debian/Ubuntu (apt)."
 
@@ -48,6 +70,10 @@ PANEL_IP="$(jget panel_ip < "$CLAIM_JSON")"
 XRAY_TARGET_VER="$(jget xray_version < "$CLAIM_JSON")"
 NODE_IMAGE_PINNED="$(jget node_image < "$CLAIM_JSON")"
 BOT_SSH_PUBKEY="$(jget bot_ssh_pubkey < "$CLAIM_JSON")"
+# chmod 600 наступает только в шаге 3 (после установки Docker) — до тех пор
+# файл должен рождаться уже непубличным, иначе cert панели лежит
+# world-readable в /tmp на всё время curl|sh докера (десятки секунд).
+install -m 600 /dev/null /tmp/_claimed_cert.pem
 python3 -c "import sys,json; print(json.load(open('$CLAIM_JSON')).get('cert_pem',''))" > /tmp/_claimed_cert.pem
 [ -s /tmp/_claimed_cert.pem ] || die "Пустой cert от бота."
 head -1 /tmp/_claimed_cert.pem | grep -q "BEGIN CERT" || die "cert от бота не похож на PEM."
@@ -154,8 +180,9 @@ if [ -z "$XRAY_TARGET_VER" ]; then
 fi
 if [ -n "$XRAY_TARGET_VER" ]; then
   XTMP="$(mktemp -d)"
-  if curl -fsSL --max-time 90 -o "$XTMP/xray.zip" \
-      "https://github.com/XTLS/Xray-core/releases/download/${XRAY_TARGET_VER}/Xray-linux-64.zip" 2>/dev/null; then
+  XZ_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_TARGET_VER}/Xray-linux-64.zip"
+  if curl -fsSL --max-time 90 -o "$XTMP/xray.zip" "$XZ_URL" 2>/dev/null; then
+    _verify_xray_zip "$XTMP/xray.zip" "$XZ_URL"
     apt-get install -y unzip -qq >/dev/null 2>&1 || true
     unzip -o "$XTMP/xray.zip" -d "$XTMP/x" >/dev/null 2>&1
     if [ -x "$XTMP/x/xray" ]; then

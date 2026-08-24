@@ -122,7 +122,16 @@ mkdir -p /opt/marzban && cp panel/Dockerfile panel/docker-compose.yml /opt/marzb
 # везде, КРОМЕ XRAY_JSON: его дефолт относительный (./xray_config.json),
 # мимо смонтированного тома /var/lib/marzban — конфиг REALITY потеряется
 # при пересоздании контейнера, если не задать явно.
-echo 'XRAY_JSON = "/var/lib/marzban/xray_config.json"' > /opt/marzban/.env
+# UVICORN_HOST/PORT — сразу на localhost: без этого Marzban первым же
+# поднятием контейнера слушает 0.0.0.0:8000 (дашборд+API) на весь интернет,
+# и висит так до шага 4 (Caddy), пока кто-то не поставит фронт. Задаём с
+# самого начала, чтобы окна открытости не было вообще — caddy/setup.sh увидит
+# значения уже выставленными и просто пропустит этот шаг.
+cat >> /opt/marzban/.env <<'EOF'
+XRAY_JSON = "/var/lib/marzban/xray_config.json"
+UVICORN_HOST = "127.0.0.1"
+UVICORN_PORT = 8001
+EOF
 cd /opt/marzban && docker compose build && docker compose up -d
 ```
 Дождитесь, пока контейнер поднимется, затем создайте sudo-админа (спросит пароль):
@@ -132,7 +141,20 @@ docker exec -it marzban-marzban-1 marzban-cli admin create -u admin --sudo
 Логин/пароль отсюда — то, что дальше попросит `deploy.sh` бота.
 Подробности образа (какие патчи и зачем) — [`panel/README.md`](panel/README.md).
 
-### 4. Заведите REALITY-инбаунд (один раз, руками)
+### 4. Настройте Caddy (фронт для mon./sub.)
+
+Делаем это ДО первого захода в дашборд — иначе идти было бы некуда: Marzban
+с прошлого шага слушает только `127.0.0.1:8001`, наружу пока ничего не отдаёт.
+```bash
+scp -r panel/caddy root@мастер:/root/caddy-setup
+ssh root@мастер 'MON_DOMAIN=mon.ваш-домен.tld SUB_DOMAIN=sub.ваш-домен.tld /root/caddy-setup/setup.sh'
+```
+Один идемпотентный скрипт: ставит Caddy, получает Let's Encrypt-серт для
+`sub.`, настраивает автопродление и проверяет, что Marzban уже на
+`127.0.0.1:8001` (порт 443 отдаёт Caddy). Подробности и разбор частых
+проблем — [`panel/caddy/README.md`](panel/caddy/README.md).
+
+### 5. Заведите REALITY-инбаунд (один раз, руками)
 
 Зайдите в дашборд Marzban (`https://mon.ваш-домен.tld/dashboard/` — путь
 дефолтный, до `randomize_paths.sh` из шага 8) → **Core Settings** → вставьте
@@ -173,17 +195,6 @@ docker exec -it marzban-marzban-1 marzban-cli admin create -u admin --sudo
 Ключи-плейсхолдеры реальными делать не нужно — как только бот будет
 развёрнут (шаг 7), сразу зайдите в **🛡 Соединение → Перегенерить ключи**,
 он сам сгенерирует настоящую X25519-пару. Руками x25519 никто не считает.
-
-### 5. Настройте Caddy (фронт для mon./sub.)
-
-```bash
-scp -r panel/caddy root@мастер:/root/caddy-setup
-ssh root@мастер 'MON_DOMAIN=mon.ваш-домен.tld SUB_DOMAIN=sub.ваш-домен.tld /root/caddy-setup/setup.sh'
-```
-Один идемпотентный скрипт: ставит Caddy, получает Let's Encrypt-серт для
-`sub.`, настраивает автопродление, переключает Marzban на `127.0.0.1:8001`
-(порт 443 отдаёт Caddy). Подробности и разбор частых проблем —
-[`panel/caddy/README.md`](panel/caddy/README.md).
 
 ### 6. Разверните первую ноду
 
