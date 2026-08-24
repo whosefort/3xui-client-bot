@@ -190,10 +190,21 @@ async def cb_decision(cb: CallbackQuery) -> None:
         return
 
     if action == "no":
+        if not db.claim_request(req_id):
+            await cb.answer("Уже обработана кем-то другим", show_alert=True)
+            return
         db.decide_request(req_id, "rejected", cb.from_user.id)
         await _safe_user_msg(req["tg_id"], "❌ Заявка отклонена. По вопросам — кнопка «Связаться».")
         await cb.message.edit_text(cb.message.html_text + "\n\n❌ <b>Отклонено</b>")
         await cb.answer("Отклонено")
+        return
+
+    # claim_request атомарно переводит pending -> processing: без этого
+    # окно между проверкой status=='pending' выше и записью решения ниже
+    # (внутри которого ждём панель) позволяет одобрить одну заявку дважды
+    # при двойном тапе/двух админах — и клиент получает двойную выдачу.
+    if not db.claim_request(req_id):
+        await cb.answer("Уже обработана кем-то другим", show_alert=True)
         return
 
     try:
@@ -202,10 +213,12 @@ async def cb_decision(cb: CallbackQuery) -> None:
         else:
             await _approve_renew(req)
     except Exception:  # noqa: BLE001
-        # Заявка НАМЕРЕННО остаётся pending — чтобы можно было повторить после
-        # устранения причины (панель прилегла и т.п.). Чтобы не зависала молча,
-        # явно подсказываем админу про кнопку «Отклонить» (она тоже снимает pending).
+        # Заявка НАМЕРЕННО возвращается в pending — чтобы можно было повторить
+        # после устранения причины (панель прилегла и т.п.). Чтобы не зависала
+        # молча, явно подсказываем админу про кнопку «Отклонить» (она тоже
+        # снимает processing/pending).
         log.exception("Ошибка подтверждения заявки %s", req_id)
+        db.release_request(req_id)
         await cb.answer(
             "Не удалось подтвердить (панель недоступна?). "
             "Повторите позже или нажмите «Отклонить».",

@@ -213,6 +213,33 @@ def decide_request(req_id: int, status: str, admin_id: int) -> None:
         _c().commit()
 
 
+def claim_request(req_id: int) -> bool:
+    """Атомарно переводит заявку pending -> processing. True, если забрали
+    именно мы — иначе кто-то (второй тап, второй админ) уже её обрабатывает.
+    Нужно перед любым await к панели: без этого проверка status=='pending' и
+    итоговый decide_request() разнесены во времени, и заявку можно одобрить
+    дважды (двойная выдача/продление)."""
+    with _lock:
+        cur = _c().execute(
+            "UPDATE requests SET status='processing' WHERE id=? AND status='pending'",
+            (req_id,),
+        )
+        _c().commit()
+        return cur.rowcount > 0
+
+
+def release_request(req_id: int) -> None:
+    """Откатывает processing -> pending — вызывать, если после claim_request
+    обработка сорвалась (панель недоступна и т.п.), чтобы заявку можно было
+    попробовать одобрить повторно."""
+    with _lock:
+        _c().execute(
+            "UPDATE requests SET status='pending' WHERE id=? AND status='processing'",
+            (req_id,),
+        )
+        _c().commit()
+
+
 # ---------- reminders ----------
 
 def already_reminded(tg_id: int, expiry_date: str, days_before: int) -> bool:

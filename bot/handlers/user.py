@@ -1,6 +1,7 @@
 """Пользовательские хендлеры: статус, покупка/продление (заявки), поддержка."""
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 
@@ -191,6 +192,14 @@ async def cb_have_sub(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
 
 
+# Один общий лок на все привязки: без него два пользователя (или два тапа
+# одного), почти одновременно назвавшие один sub_id, оба проходят проверку
+# "client.tg_id ещё не занят" до того, как первый успевает реально
+# привязаться — второй bind_tgid() молча перезаписывает первого владельца.
+# Привязка — редкое разовое действие, глобальная сериализация тут не проблема.
+_bind_lock = asyncio.Lock()
+
+
 @router.message(Bind.waiting, F.text)
 async def bind_input(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -200,20 +209,21 @@ async def bind_input(message: Message, state: FSMContext) -> None:
     if not sub_id:
         await message.answer(texts.bind_bad_input(), reply_markup=back_to_menu())
         return
-    client = await panel.find_by_subid(sub_id)
-    if not client:
-        await message.answer(texts.bind_not_found(), reply_markup=back_to_menu())
-        return
-    if client.tg_id and client.tg_id != me:
-        # подписка уже принадлежит другому Telegram — не даём перехватить
-        await message.answer(texts.bind_taken(), reply_markup=back_to_menu())
-        await notify_admins(
-            f"⚠️ {html.escape(_uname(message) or str(me))} (id <code>{me}</code>) "
-            f"пытался привязать чужую подписку <code>{html.escape(client.username)}</code> "
-            f"(уже за tgId <code>{client.tg_id}</code>)."
-        )
-        return
-    await panel.bind_tgid(client=client, tg_id=me)
+    async with _bind_lock:
+        client = await panel.find_by_subid(sub_id)
+        if not client:
+            await message.answer(texts.bind_not_found(), reply_markup=back_to_menu())
+            return
+        if client.tg_id and client.tg_id != me:
+            # подписка уже принадлежит другому Telegram — не даём перехватить
+            await message.answer(texts.bind_taken(), reply_markup=back_to_menu())
+            await notify_admins(
+                f"⚠️ {html.escape(_uname(message) or str(me))} (id <code>{me}</code>) "
+                f"пытался привязать чужую подписку <code>{html.escape(client.username)}</code> "
+                f"(уже за tgId <code>{client.tg_id}</code>)."
+            )
+            return
+        await panel.bind_tgid(client=client, tg_id=me)
     db.upsert_user(me, _uname(message), client_email=client.username, sub_id=client.sub_url)
     await message.answer(texts.bind_ok(), reply_markup=bind_ok_kb())
     await notify_admins(
