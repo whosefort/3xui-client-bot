@@ -24,7 +24,7 @@ from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
                          confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
-                         reality_menu_kb, reality_scan_results_kb, reality_sids_kb,
+                         reality_fp_picker_kb, reality_menu_kb, reality_scan_results_kb, reality_sids_kb,
                          reality_sni_result_kb,
                          server_card_kb, server_fp_picker_kb, server_sni_picker_kb,
                          settings_kb, setup_start_kb, xray_upgrade_confirm_kb)
@@ -2028,6 +2028,35 @@ async def reality_spx_input(message: Message, state: FSMContext) -> None:
         await message.answer(f"✅ SpiderX теперь <code>{html.escape(value)}</code>.")
     else:
         await message.answer("✅ SpiderX сброшен на дефолт.")
+
+
+# ---------- фингерпринт разом на все ноды ----------
+
+@router.callback_query(F.data == "rl:fp")
+async def cb_rl_fp(cb: CallbackQuery) -> None:
+    await cb.message.answer(
+        "🫆 Фингерпринт для ВСЕХ серверов разом (у каждого по отдельности — "
+        "в карточке сервера, «🌍 Серверы»). «randomized» — свой отпечаток на "
+        "каждое соединение, надёжнее одного фиксированного значения на весь флот.",
+        reply_markup=reality_fp_picker_kb(reality_admin.FINGERPRINT_OPTIONS),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("rl:fppick:"))
+async def cb_rl_fppick(cb: CallbackQuery) -> None:
+    fp = cb.data.split(":", 2)[2]
+    await cb.answer()
+    try:
+        changed = await reality_admin.set_fingerprint_all(fp)
+    except reality_admin.RealityError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("cb_rl_fppick failed")
+        await cb.message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    await cb.message.answer(f"✅ Фингерпринт <code>{html.escape(fp)}</code> применён на {changed} серверах.")
 
 
 # ---------- утилиты ----------
