@@ -13,6 +13,7 @@ import ipaddress
 import logging
 import subprocess
 
+import aiohttp
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -28,7 +29,8 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          reality_scan_results_kb, reality_sids_kb, reality_spx_picker_kb,
                          reality_sni_result_kb,
                          server_card_kb, server_fp_picker_kb, server_sni_picker_kb,
-                         settings_kb, setup_start_kb, xray_upgrade_confirm_kb)
+                         settings_kb, setup_start_kb, xray_channel_pick_kb,
+                         xray_upgrade_confirm_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
 from .common import get_traffic_gb
@@ -1071,9 +1073,13 @@ async def kb_add_server(message: Message, state: FSMContext) -> None:
     await message.answer(
         "🖥 Пришли <b>публичный IP</b> новой ноды. Можно через пробел добавить имя:\n"
         "<code>203.0.113.10 eu-frankfurt-02</code>\n\n"
-        "По умолчанию образ marzban-node — зафиксированная стабильная версия. "
-        "Чтобы взять свежую :latest вместо неё, допиши <code>latest</code> третьим словом:\n"
-        "<code>203.0.113.10 eu-frankfurt-02 latest</code>\n\n"
+        "По умолчанию образ marzban-node — зафиксированная стабильная версия, "
+        "xray-core — пин из node/XRAY_VERSION. Ключевые слова (в любом месте, "
+        "через пробел), чтобы взять свежее:\n"
+        "• <code>latest</code> — образ marzban-node :latest\n"
+        "• <code>xraylatest</code> — xray-core последний тег с GitHub (xray-core "
+        "выходит часто, пин может отставать)\n"
+        "<code>203.0.113.10 eu-frankfurt-02 xraylatest</code>\n\n"
         "VPS должен быть чистым (Ubuntu/Debian), root-доступ понадобится тебе — "
         "не мне и не боту, я его не спрашиваю."
     )
@@ -1089,9 +1095,17 @@ async def add_server_input(message: Message, state: FSMContext) -> None:
     address = tokens[0]
     rest = tokens[1:]
     image_channel = "stable"
-    if rest and rest[-1].lower() == "latest":
-        image_channel = "latest"
-        rest = rest[:-1]
+    xray_channel = "stable"
+    filtered = []
+    for t in rest:
+        low = t.lower()
+        if low == "latest":
+            image_channel = "latest"
+        elif low == "xraylatest":
+            xray_channel = "latest"
+        else:
+            filtered.append(t)
+    rest = filtered
     name = " ".join(rest) if rest else address
     try:
         ipaddress.ip_address(address)
@@ -1115,6 +1129,7 @@ async def add_server_input(message: Message, state: FSMContext) -> None:
         token=token, node_id=reg["node_id"], node_name=name, address=address,
         cert_pem=reg["cert_pem"], panel_ip=reg["panel_ip"],
         ttl_seconds=config.node_token_ttl_seconds, created_by=message.from_user.id,
+        xray_channel=xray_channel,
     )
 
     claim_url = f"{config.marzban_url}:{config.node_provision_port}/nodeprovision/claim"
@@ -1126,9 +1141,11 @@ async def add_server_input(message: Message, state: FSMContext) -> None:
     )
     image_note = "образ marzban-node: :latest (выбрано вручную)" if image_channel == "latest" \
         else "образ marzban-node: зафиксированная стабильная версия"
+    xray_note = "xray-core: последний тег с GitHub (выбрано вручную)" if xray_channel == "latest" \
+        else "xray-core: пин из node/XRAY_VERSION"
     await message.answer(
         f"✅ Нода id={reg['node_id']} зарегистрирована в панели ({address}).\n"
-        f"Токен живёт {ttl_min} мин, одноразовый. {image_note}.\n\n"
+        f"Токен живёт {ttl_min} мин, одноразовый. {image_note}, {xray_note}.\n\n"
         f"Вставь эту команду в SSH-сессию нового VPS (под root):\n\n"
         f"<code>{html.escape(cmd)}</code>"
     )
@@ -1516,6 +1533,25 @@ def _xray_pin() -> str:
         return f.read().strip()
 
 
+async def _github_latest_xray_version() -> str | None:
+    """Живой запрос к GitHub API — не полагаемся на node/XRAY_VERSION, тот
+    пин обновляется руками и xray-core выходит часто (см. node/DISASTER_RECOVERY.md
+    контекст в чате: залипание на старом пине уже путали с сетевыми проблемами)."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5",
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as r:
+                data = await r.json(content_type=None)
+                if r.status >= 400 or not data:
+                    return None
+                return data[0].get("tag_name")
+    except Exception:  # noqa: BLE001
+        log.exception("не смог получить latest xray-core с GitHub")
+        return None
+
+
 @router.callback_query(F.data == "srv:xrayup")
 async def cb_srv_xrayup(cb: CallbackQuery) -> None:
     try:
@@ -1524,22 +1560,42 @@ async def cb_srv_xrayup(cb: CallbackQuery) -> None:
         await cb.answer("node/XRAY_VERSION не найден", show_alert=True)
         return
     await cb.message.answer(
-        f"🔄 Обновить xray-core до <code>{html.escape(pin)}</code> (пин из node/XRAY_VERSION) "
-        f"на ВСЕХ подключённых нодах по SSH? Ядро на каждой ноде перезапустится — "
-        f"клиенты на ней разорвут соединение на пару секунд.",
-        reply_markup=xray_upgrade_confirm_kb(),
+        "🔄 Обновить xray-core на ВСЕХ подключённых нодах по SSH? Ядро на "
+        "каждой ноде перезапустится — клиенты на ней разорвут соединение на "
+        "пару секунд.\n\n"
+        "Стабильная — уже проверенный пин из node/XRAY_VERSION. Последняя — "
+        "живой запрос к GitHub, xray-core обновляется часто, пин мог отстать.",
+        reply_markup=xray_channel_pick_kb(pin),
     )
     await cb.answer()
 
 
-@router.callback_query(F.data == "srv:xrayupgo")
+@router.callback_query(F.data.startswith("srv:xrayver:"))
+async def cb_srv_xrayver(cb: CallbackQuery) -> None:
+    channel = cb.data.split(":", 2)[2]
+    if channel == "stable":
+        try:
+            version = _xray_pin()
+        except OSError:
+            await cb.answer("node/XRAY_VERSION не найден", show_alert=True)
+            return
+    else:
+        await cb.answer("Спрашиваю GitHub…")
+        version = await _github_latest_xray_version()
+        if not version:
+            await cb.message.answer("❌ Не смог получить последнюю версию с GitHub. Попробуй ещё раз позже.")
+            return
+    await cb.message.edit_text(
+        f"Обновить xray-core до <code>{html.escape(version)}</code> на ВСЕХ нодах?",
+        reply_markup=xray_upgrade_confirm_kb(version),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("srv:xrayupgo:"))
 async def cb_srv_xrayupgo(cb: CallbackQuery) -> None:
     await cb.answer()
-    try:
-        pin = _xray_pin()
-    except OSError:
-        await cb.message.answer("❌ node/XRAY_VERSION не найден.")
-        return
+    pin = cb.data.split(":", 2)[2]
     try:
         nodes = await node_provision.list_nodes()
     except node_provision.ProvisionError as e:

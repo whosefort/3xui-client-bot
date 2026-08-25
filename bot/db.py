@@ -102,6 +102,15 @@ def init(db_path: str) -> None:
         );
         """
     )
+    # Миграция: xray_channel добавлен позже (выбор stable/latest при
+    # разворачивании ноды) — CREATE TABLE IF NOT EXISTS не трогает уже
+    # существующую таблицу, поэтому колонку добавляем отдельно, один раз.
+    try:
+        _conn.execute(
+            "ALTER TABLE node_tokens ADD COLUMN xray_channel TEXT NOT NULL DEFAULT 'stable'"
+        )
+    except sqlite3.OperationalError:
+        pass  # уже применена в прошлый запуск
     _conn.commit()
 
 
@@ -317,14 +326,15 @@ def get_client_note(client_username: str) -> Optional[str]:
 # ---------- node_tokens (авторазвёртывание нод) ----------
 
 def create_node_token(token: str, node_id: int, node_name: str, address: str,
-                      cert_pem: str, panel_ip: str, ttl_seconds: int, created_by: int) -> None:
+                      cert_pem: str, panel_ip: str, ttl_seconds: int, created_by: int,
+                      xray_channel: str = "stable") -> None:
     now = int(time.time())
     with _lock:
         _c().execute(
             "INSERT INTO node_tokens(token,node_id,node_name,address,cert_pem,panel_ip,"
-            "created_at,expires_at,created_by) VALUES(?,?,?,?,?,?,?,?,?)",
+            "created_at,expires_at,created_by,xray_channel) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (token, node_id, node_name, address, cert_pem, panel_ip,
-             now, now + ttl_seconds, created_by),
+             now, now + ttl_seconds, created_by, xray_channel),
         )
         _c().commit()
 

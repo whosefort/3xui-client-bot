@@ -64,13 +64,18 @@ async def _claim(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid, expired or already used token"}, status=403)
 
     log.info("нода id=%s (%s) забрала cert по токену", row["node_id"], row["address"])
+    # xray_channel='latest' — намеренно отдаём пустой xray_version: у
+    # bootstrap_token.sh уже есть штатный фолбэк "пусто -> спросить GitHub
+    # latest сам", не дублируем этот запрос здесь.
+    xray_channel = row["xray_channel"] if "xray_channel" in row.keys() else "stable"
+    xray_version = "" if xray_channel == "latest" else _read_xray_version()
     return web.json_response({
         "node_id": row["node_id"],
         "node_name": row["node_name"],
         "address": row["address"],
         "cert_pem": row["cert_pem"],
         "panel_ip": row["panel_ip"],
-        "xray_version": _read_xray_version(),
+        "xray_version": xray_version,
         "node_image": _read_node_image(),
         "bot_ssh_pubkey": ssh_ops.ensure_keypair(),
     })

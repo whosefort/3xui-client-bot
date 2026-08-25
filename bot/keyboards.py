@@ -234,9 +234,22 @@ def servers_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def xray_upgrade_confirm_kb() -> InlineKeyboardMarkup:
+def xray_channel_pick_kb(pin: str) -> InlineKeyboardMarkup:
+    """Выбор канала ПЕРЕД апгрейдом: пин (то, что уже проверено — сохраняем
+    как явный вариант, не только рефлекс на новый релиз) или живой latest с
+    GitHub (версия резолвится по кнопке, не заранее — тег может смениться
+    между показом меню и нажатием)."""
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Обновить все ноды", callback_data="srv:xrayupgo")
+    kb.button(text=f"📌 Стабильная ({pin})", callback_data="srv:xrayver:stable")
+    kb.button(text="🆕 Последняя с GitHub", callback_data="srv:xrayver:latest")
+    kb.button(text="✖️ Отмена", callback_data="srv:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def xray_upgrade_confirm_kb(version: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Обновить все ноды", callback_data=f"srv:xrayupgo:{version}")
     kb.button(text="✖️ Отмена", callback_data="srv:list")
     kb.adjust(1)
     return kb.as_markup()
