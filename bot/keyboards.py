@@ -374,6 +374,26 @@ def warp_node_kb(address: str, registered: bool, domains: list[str]) -> InlineKe
     return kb.as_markup()
 
 
+def warp_domadd_categories_kb(address: str, categories: list[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for i, name in enumerate(categories):
+        kb.button(text=name, callback_data=f"rl:warp:domcat:{address}:{i}")
+    kb.button(text="✏️ Свой домен", callback_data=f"rl:warp:dommanual:{address}")
+    kb.button(text="↩️ Назад", callback_data=f"rl:warp:node:{address}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def warp_domadd_domains_kb(address: str, cat_idx: int, domains: list[str], already: list[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for i, d in enumerate(domains):
+        text = f"✅ {d} (уже добавлен)" if d in already else d
+        kb.button(text=text, callback_data=f"rl:warp:dompick:{address}:{cat_idx}:{i}")
+    kb.button(text="↩️ К категориям", callback_data=f"rl:warp:domadd:{address}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def reality_sids_kb(short_ids: list[str]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for sid in short_ids:

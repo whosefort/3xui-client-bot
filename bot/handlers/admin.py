@@ -29,7 +29,8 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          reality_scan_results_kb, reality_sids_kb, reality_spx_picker_kb,
                          reality_sni_result_kb,
                          server_card_kb, server_fp_picker_kb, server_sni_picker_kb,
-                         settings_kb, setup_start_kb, warp_node_kb, warp_nodes_kb,
+                         settings_kb, setup_start_kb, warp_domadd_categories_kb,
+                         warp_domadd_domains_kb, warp_node_kb, warp_nodes_kb,
                          xray_channel_pick_kb, xray_upgrade_confirm_kb)
 from ..panels.base import Client
 from ..runtime import get_bot, get_panel
@@ -2274,6 +2275,60 @@ async def cb_rl_warp_del(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("rl:warp:domadd:"))
 async def cb_rl_warp_domadd(cb: CallbackQuery, state: FSMContext) -> None:
+    address = cb.data.split(":", 3)[3]
+    await state.clear()
+    categories = [name for name, _ in warp_admin.WARP_DOMAIN_PRESETS]
+    await cb.message.edit_text(
+        "Через какую категорию доменов? Или свой домен вручную.",
+        reply_markup=warp_domadd_categories_kb(address, categories),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("rl:warp:domcat:"))
+async def cb_rl_warp_domcat(cb: CallbackQuery) -> None:
+    _, _, _, address, idx_s = cb.data.split(":", 4)
+    await cb.answer()
+    cat_idx = int(idx_s)
+    if not (0 <= cat_idx < len(warp_admin.WARP_DOMAIN_PRESETS)):
+        await cb.message.answer("Категория не найдена, начни заново.")
+        return
+    name, domains = warp_admin.WARP_DOMAIN_PRESETS[cat_idx]
+    try:
+        already = await warp_admin.list_warp_routes(_warp_tag(address))
+    except warp_admin.WarpAdminError as e:
+        await cb.message.answer(f"❌ Не удалось получить текущие домены: {e}")
+        already = []
+    await cb.message.edit_text(
+        f"{name} — выбери домен (уже добавленные помечены):",
+        reply_markup=warp_domadd_domains_kb(address, cat_idx, domains, already),
+    )
+
+
+@router.callback_query(F.data.startswith("rl:warp:dompick:"))
+async def cb_rl_warp_dompick(cb: CallbackQuery) -> None:
+    _, _, _, address, cat_idx_s, dom_idx_s = cb.data.split(":", 5)
+    await cb.answer()
+    cat_idx, dom_idx = int(cat_idx_s), int(dom_idx_s)
+    if not (0 <= cat_idx < len(warp_admin.WARP_DOMAIN_PRESETS)):
+        await cb.message.answer("Категория не найдена, начни заново.")
+        return
+    _, domains = warp_admin.WARP_DOMAIN_PRESETS[cat_idx]
+    if not (0 <= dom_idx < len(domains)):
+        await cb.message.answer("Домен не найден, начни заново.")
+        return
+    domain = domains[dom_idx]
+    try:
+        await warp_admin.add_warp_route(_warp_tag(address), domain)
+    except warp_admin.WarpAdminError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+        return
+    await cb.message.answer(f"✅ <code>{html.escape(domain)}</code> теперь идёт через WARP этой ноды.")
+    await _warp_node_screen(cb, address)
+
+
+@router.callback_query(F.data.startswith("rl:warp:dommanual:"))
+async def cb_rl_warp_dommanual(cb: CallbackQuery, state: FSMContext) -> None:
     address = cb.data.split(":", 3)[3]
     await state.set_state(AdminFSM.warp_domain)
     await state.update_data(warp_address=address)

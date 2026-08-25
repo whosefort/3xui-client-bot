@@ -25,6 +25,42 @@ class WarpAdminError(Exception):
     pass
 
 
+# Затравка для пикера при добавлении WARP-домена — сервисы, которые
+# известны тем, что жёстко палят датацентровые/VPN-подсети (капча, отказ в
+# доступе, «unusual traffic»), поэтому egress через WARP-IP для них
+# осмыслен. Не гарантия, что конкретно сегодня поможет именно с конкретной
+# нодой — админ сам решает и может добавить свой домен вручную.
+WARP_DOMAIN_PRESETS: list[tuple[str, list[str]]] = [
+    ("🤖 Нейросети", [
+        "chatgpt.com",
+        "chat.openai.com",
+        "auth0.openai.com",
+        "claude.ai",
+        "gemini.google.com",
+        "perplexity.ai",
+        "huggingface.co",
+        "character.ai",
+    ]),
+    ("🔍 Google", [
+        "google.com",
+        "accounts.google.com",
+        "mail.google.com",
+        "drive.google.com",
+        "play.google.com",
+        "translate.google.com",
+    ]),
+    ("🎵 Музыка/медиа", [
+        "soundcloud.com",
+        "api-v2.soundcloud.com",
+    ]),
+    ("🌐 Другое", [
+        "notion.so",
+        "www.notion.so",
+        "discord.com",
+    ]),
+]
+
+
 def valid_domain(domain: str) -> bool:
     return bool(_DOMAIN_RE.match((domain or "").strip()))
 
