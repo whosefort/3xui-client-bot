@@ -343,7 +343,33 @@ def reality_menu_kb(ru_block_on: bool = False) -> InlineKeyboardMarkup:
         text=("🇷🇺 Блок .ru/.su на ноде: выключить" if ru_block_on else "🇷🇺 Блок .ru/.su на ноде: включить"),
         callback_data="rl:rublocktoggle",
     )
+    kb.button(text="🌐 WARP", callback_data="rl:warp")
     kb.button(text="✖️ Закрыть", callback_data="rl:close")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def warp_nodes_kb(nodes: list[tuple[str, str, bool]]) -> InlineKeyboardMarkup:
+    """nodes: [(address, name, registered), ...]."""
+    kb = InlineKeyboardBuilder()
+    for address, name, registered in nodes:
+        icon = "✅" if registered else "⚪️"
+        kb.button(text=f"{icon} {name}", callback_data=f"rl:warp:node:{address}")
+    kb.button(text="✖️ Закрыть", callback_data="rl:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def warp_node_kb(address: str, registered: bool, domains: list[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if not registered:
+        kb.button(text="✅ Зарегистрировать WARP", callback_data=f"rl:warp:reg:{address}")
+    else:
+        for i, d in enumerate(domains):
+            kb.button(text=f"🗑 {d}", callback_data=f"rl:warp:domrm:{address}:{i}")
+        kb.button(text="➕ Добавить домен", callback_data=f"rl:warp:domadd:{address}")
+        kb.button(text="🗑 Удалить WARP-identity", callback_data=f"rl:warp:del:{address}")
+    kb.button(text="↩️ К списку нод", callback_data="rl:warp")
     kb.adjust(1)
     return kb.as_markup()
 
