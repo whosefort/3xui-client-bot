@@ -2327,6 +2327,24 @@ async def cb_rl_warp_dompick(cb: CallbackQuery) -> None:
     await _warp_node_screen(cb, address)
 
 
+@router.callback_query(F.data.startswith("rl:warp:domcatall:"))
+async def cb_rl_warp_domcatall(cb: CallbackQuery) -> None:
+    _, _, _, address, idx_s = cb.data.split(":", 4)
+    await cb.answer()
+    cat_idx = int(idx_s)
+    if not (0 <= cat_idx < len(warp_admin.WARP_DOMAIN_PRESETS)):
+        await cb.message.answer("Категория не найдена, начни заново.")
+        return
+    name, domains = warp_admin.WARP_DOMAIN_PRESETS[cat_idx]
+    try:
+        added = await warp_admin.add_warp_route_bulk(_warp_tag(address), domains)
+    except warp_admin.WarpAdminError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+        return
+    await cb.message.answer(f"✅ {name}: добавлено {added} домен(ов) (из {len(domains)}).")
+    await _warp_node_screen(cb, address)
+
+
 @router.callback_query(F.data.startswith("rl:warp:dommanual:"))
 async def cb_rl_warp_dommanual(cb: CallbackQuery, state: FSMContext) -> None:
     address = cb.data.split(":", 3)[3]

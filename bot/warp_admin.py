@@ -205,6 +205,39 @@ async def add_warp_route(tag: str, domain: str) -> None:
             raise WarpAdminError("после сохранения домена нет в правиле — применилось не то, что просили")
 
 
+async def add_warp_route_bulk(tag: str, domains: list[str]) -> int:
+    """Добавляет сразу список доменов (например целую категорию из
+    WARP_DOMAIN_PRESETS) ОДНИМ GET-merge-PUT, а не N последовательных —
+    иначе N доменов это N отдельных перехватов config_lock и N сетевых
+    round-trip'ов до панели без всякой пользы. Возвращает число реально
+    добавленных (уже присутствовавшие пропускаются)."""
+    async with config_lock, aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        cfg = await _get_config(s, headers)
+
+        if not _find_outbound(cfg, tag):
+            raise WarpAdminError(f"outbound {tag!r} не найден — зарегистрируй WARP на ноде сначала")
+
+        rule = _find_route_rule(cfg, tag)
+        if not rule:
+            rule = {"type": "field", "domain": [], "outboundTag": tag}
+            cfg.setdefault("routing", {}).setdefault("rules", []).insert(0, rule)
+        existing = set(rule.setdefault("domain", []))
+        added = [d for d in domains if d not in existing]
+        if not added:
+            return 0
+        rule["domain"].extend(added)
+        await _put_config(s, headers, cfg)
+
+        verify_cfg = await _get_config(s, headers)
+        verify_rule = _find_route_rule(verify_cfg, tag)
+        verify_domains = set(verify_rule.get("domain", [])) if verify_rule else set()
+        if not set(added) <= verify_domains:
+            raise WarpAdminError("после сохранения не все домены оказались в правиле — применилось не то, что просили")
+        return len(added)
+
+
 async def remove_warp_route(tag: str, domain: str) -> None:
     async with config_lock, aiohttp.ClientSession() as s:
         token = await _marzban_auth(s)

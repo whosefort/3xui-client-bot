@@ -386,6 +386,9 @@ def warp_domadd_categories_kb(address: str, categories: list[str]) -> InlineKeyb
 
 def warp_domadd_domains_kb(address: str, cat_idx: int, domains: list[str], already: list[str]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    remaining = len(domains) - sum(1 for d in domains if d in already)
+    if remaining:
+        kb.button(text=f"➕ Добавить все ({remaining})", callback_data=f"rl:warp:domcatall:{address}:{cat_idx}")
     for i, d in enumerate(domains):
         text = f"✅ {d} (уже добавлен)" if d in already else d
         kb.button(text=text, callback_data=f"rl:warp:dompick:{address}:{cat_idx}:{i}")
