@@ -37,12 +37,17 @@ _DEFAULT_PORT = 443
 # нестабильный кандидат, решать вручную. cisco.com не добавлен: сама Cisco
 # геоблокирует часть своих сервисов для трафика из РФ (Cisco Umbrella и
 # т.п.) — риск не со стороны РКН, а со стороны самого сайта.
+# www.cloudflare.com и www.yahoo.com — не с потолка: нашлись сканом обеих
+# нодовых /24-подсетей (RealiTLScanner) и прошли живую проверку
+# check_sni_candidate (честный TLS1.3, доверенный CA, без редиректа).
 SUGGESTED_DOMAINS = [
     "dl.google.com",
     "www.microsoft.com",
     "addons.mozilla.org",
     "www.swift.org",
     "gitlab.com",
+    "www.cloudflare.com",
+    "www.yahoo.com",
     "www.speedtest.net",
 ]
 
