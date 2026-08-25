@@ -15,6 +15,7 @@ import subprocess
 
 import aiohttp
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -2184,19 +2185,33 @@ def _warp_tag(address: str) -> str:
     return "warp-" + address.replace(".", "-").replace(":", "-")
 
 
+async def _safe_edit(message: Message, text: str, reply_markup=None) -> None:
+    """edit_text, но не роняет апдейт, если контент и клавиатура ничем не
+    отличаются от текущих (например повторный клик по той же ноде без
+    изменений с прошлого показа) — Telegram в этом случае отвечает 400
+    'message is not modified', и без catch это всплывало необработанным
+    исключением в логах (см. чат)."""
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
+
 async def _warp_nodes_screen(cb: CallbackQuery) -> None:
     try:
         nodes = await node_provision.list_nodes()
         outbounds = await warp_admin.list_warp_outbounds()
     except (node_provision.ProvisionError, warp_admin.WarpAdminError) as e:
-        await cb.message.edit_text(f"❌ Не удалось получить данные: {e}")
+        await _safe_edit(cb.message, f"❌ Не удалось получить данные: {e}")
         return
     tags = {o["tag"] for o in outbounds}
     items = [(n["address"], n.get("name") or n["address"], _warp_tag(n["address"]) in tags) for n in nodes]
     if not items:
-        await cb.message.edit_text("Нод нет.")
+        await _safe_edit(cb.message, "Нод нет.")
         return
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb.message,
         "🌐 <b>WARP</b>\nОтдельная identity на ноду (см. обсуждение в чате — общий "
         "core config, полной изоляции по нодам это не даёт, но снижает риск). "
         "Выбери ноду:",
@@ -2216,7 +2231,7 @@ async def _warp_node_screen(cb: CallbackQuery, address: str) -> None:
     try:
         outbounds = await warp_admin.list_warp_outbounds()
     except warp_admin.WarpAdminError as e:
-        await cb.message.edit_text(f"❌ Не удалось получить данные: {e}")
+        await _safe_edit(cb.message, f"❌ Не удалось получить данные: {e}")
         return
     registered = any(o["tag"] == tag for o in outbounds)
     domains: list[str] = []
@@ -2227,7 +2242,8 @@ async def _warp_node_screen(cb: CallbackQuery, address: str) -> None:
             await cb.message.answer(f"⚠️ Не смог получить список доменов: {e}")
     status = "✅ зарегистрирован" if registered else "⚪️ не зарегистрирован"
     dom_line = ("\n".join(f"• <code>{html.escape(d)}</code>" for d in domains) or "—") if registered else "—"
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb.message,
         f"🌐 <b>WARP — {html.escape(address)}</b>\n"
         f"Статус: {status}\n"
         f"Домены через WARP:\n{dom_line}",
@@ -2278,7 +2294,8 @@ async def cb_rl_warp_domadd(cb: CallbackQuery, state: FSMContext) -> None:
     address = cb.data.split(":", 3)[3]
     await state.clear()
     categories = [name for name, _ in warp_admin.WARP_DOMAIN_PRESETS]
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb.message,
         "Через какую категорию доменов? Или свой домен вручную.",
         reply_markup=warp_domadd_categories_kb(address, categories),
     )
@@ -2299,7 +2316,8 @@ async def cb_rl_warp_domcat(cb: CallbackQuery) -> None:
     except warp_admin.WarpAdminError as e:
         await cb.message.answer(f"❌ Не удалось получить текущие домены: {e}")
         already = []
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb.message,
         f"{name} — выбери домен (уже добавленные помечены):",
         reply_markup=warp_domadd_domains_kb(address, cat_idx, domains, already),
     )
