@@ -126,9 +126,16 @@ async def scan(target: str, *, thread: int = 50, timeout_s: int = 8, max_results
     seen: set[str] = set()
     results = []
     for row in rows:
-        if len(row) < 5:
+        # Реальный формат RealiTLScanner v0.2.3 (проверено вживую):
+        # IP,ORIGIN,TLS,ALPN,CURVE,CERT_LENGTH,CERT_SIGNATURE,CERT_PUBLICKEY,
+        # CERT_DOMAIN,CERT_ISSUER,GEO_CODE — 11 колонок, домен/issuer/geo на
+        # позициях 8/9/10, не 2/3/4. Плюс файл начинается с заголовка (IP,...) —
+        # без обеих поправок сюда попадали "TLS"/"ALPN"/"CURVE" как fake-домены.
+        if row and row[0] == "IP":
             continue
-        _ip, _origin, cert_domain, cert_issuer, geo = row[:5]
+        if len(row) < 11:
+            continue
+        cert_domain, cert_issuer, geo = row[8], row[9], row[10]
         cert_domain = cert_domain.strip().lstrip("*.")
         if not cert_domain or cert_domain in seen:
             continue
