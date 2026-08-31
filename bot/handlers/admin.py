@@ -30,6 +30,7 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          reality_scan_results_kb, reality_sids_kb, reality_spx_picker_kb,
                          reality_sni_result_kb,
                          server_card_kb, server_fp_picker_kb, server_sni_picker_kb,
+                         server_xray_channel_kb, server_xray_confirm_kb,
                          settings_kb, setup_start_kb, warp_domadd_categories_kb,
                          warp_domadd_domains_kb, warp_node_kb, warp_nodes_kb,
                          xray_channel_pick_kb, xray_upgrade_confirm_kb)
@@ -1534,6 +1535,99 @@ async def cb_srv_fppick(cb: CallbackQuery) -> None:
         _server_card_text(match, tag),
         reply_markup=server_card_kb(key, fragment_on=match["fragment"]),
     )
+
+
+@router.callback_query(F.data.startswith("srv:nodexray:"))
+async def cb_srv_nodexray(cb: CallbackQuery) -> None:
+    key = cb.data.split(":", 2)[2]
+    tag, _, idx = key.partition(":")
+    try:
+        match = await _find_server(tag, idx)
+    except node_provision.ProvisionError as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    if not match:
+        await cb.answer("Сервер не найден (список изменился)", show_alert=True)
+        return
+    try:
+        pin = _xray_pin()
+    except OSError:
+        await cb.answer("node/XRAY_VERSION не найден", show_alert=True)
+        return
+    await cb.message.edit_text(
+        f"🔄 Обновить xray-core на <b>{html.escape(_server_label(match))}</b> — "
+        f"только эту ноду, остальные не тронутся. Ядро перезапустится, клиенты "
+        f"на ней разорвут соединение на пару секунд.\n\n"
+        f"Наш пин может быть pre-release. Последняя стабильная — без pre-release, "
+        f"шире совместимость со старыми клиентами.",
+        reply_markup=server_xray_channel_kb(key, pin),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("srv:nodexrayver:"))
+async def cb_srv_nodexrayver(cb: CallbackQuery) -> None:
+    rest = cb.data[len("srv:nodexrayver:"):]
+    channel, _, key = rest.partition(":")
+    if channel == "stable":
+        try:
+            version = _xray_pin()
+        except OSError:
+            await cb.answer("node/XRAY_VERSION не найден", show_alert=True)
+            return
+    elif channel == "laststable":
+        await cb.answer("Спрашиваю GitHub (stable)…")
+        version = await _github_latest_stable_xray_version()
+        if not version:
+            await cb.message.answer("❌ Не смог получить последнюю стабильную версию с GitHub. Попробуй позже.")
+            return
+    else:
+        await cb.answer("Спрашиваю GitHub…")
+        version = await _github_latest_xray_version()
+        if not version:
+            await cb.message.answer("❌ Не смог получить последнюю версию с GitHub. Попробуй ещё раз позже.")
+            return
+    await cb.message.edit_text(
+        f"Обновить xray-core до <code>{html.escape(version)}</code> на этой ноде?",
+        reply_markup=server_xray_confirm_kb(key, version),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("srv:nodexrayupgo:"))
+async def cb_srv_nodexrayupgo(cb: CallbackQuery) -> None:
+    rest = cb.data[len("srv:nodexrayupgo:"):]
+    version, _, key = rest.partition(":")
+    tag, _, idx = key.partition(":")
+    await cb.answer()
+    try:
+        match = await _find_server(tag, idx)
+    except node_provision.ProvisionError as e:
+        await cb.message.answer(f"❌ Не удалось получить список нод: {e}")
+        return
+    if not match:
+        await cb.message.answer("Сервер не найден (список изменился)")
+        return
+    await cb.message.answer(f"Обновляю {html.escape(_server_label(match))} до {html.escape(version)}…")
+    try:
+        await ssh_ops.upgrade_node(match["address"], version)
+    except ssh_ops.SSHOpError as e:
+        await cb.message.answer(f"❌ {html.escape(_server_label(match))}: {html.escape(str(e))}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("node xray upgrade failed for %s", match["address"])
+        await cb.message.answer("❌ Ошибка. См. логи.")
+        return
+    await cb.message.answer(f"✅ {html.escape(_server_label(match))} обновлена до {html.escape(version)}.")
+    try:
+        match = await _find_server(tag, idx)
+    except node_provision.ProvisionError:
+        return
+    if match:
+        await cb.message.answer(
+            _server_card_text(match, tag),
+            reply_markup=server_card_kb(key, fragment_on=match["fragment"]),
+        )
 
 
 def _xray_pin() -> str:

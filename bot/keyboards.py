@@ -286,9 +286,33 @@ def server_card_kb(key: str, fragment_on: bool = False) -> InlineKeyboardMarkup:
         callback_data=f"srv:fragtoggle:{key}",
     )
     kb.button(text="🫆 TLS-фингерпринт", callback_data=f"srv:fp:{key}")
+    kb.button(text="🔄 xray-core (только эта нода)", callback_data=f"srv:nodexray:{key}")
     kb.button(text="🩺 Проверить туннель", callback_data=f"srv:verify:{key}")
     kb.button(text="📊 Ресурсы", callback_data=f"srv:res:{key}")
     kb.button(text="↩️ К списку", callback_data="srv:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def server_xray_channel_kb(key: str, pin: str) -> InlineKeyboardMarkup:
+    """Тот же выбор канала, что и у флот-апгрейда (srv:xrayup), но
+    для ОДНОЙ конкретной ноды — версия xray-core это бинарь внутри
+    контейнера ноды, ставится по SSH независимо, никак не завязана на
+    общий core config, поэтому per-node пин архитектурно возможен
+    (в отличие от ключей/shortId/spx/порта)."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"📌 Наш пин ({pin})", callback_data=f"srv:nodexrayver:stable:{key}")
+    kb.button(text="🏛 Последняя стабильная (не pre-release)", callback_data=f"srv:nodexrayver:laststable:{key}")
+    kb.button(text="🆕 Последняя с GitHub (включая pre-release)", callback_data=f"srv:nodexrayver:latest:{key}")
+    kb.button(text="✖️ Отмена", callback_data=f"srv:open:{key}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def server_xray_confirm_kb(key: str, version: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Обновить эту ноду", callback_data=f"srv:nodexrayupgo:{version}:{key}")
+    kb.button(text="✖️ Отмена", callback_data=f"srv:open:{key}")
     kb.adjust(1)
     return kb.as_markup()
 
