@@ -1077,12 +1077,13 @@ async def kb_add_server(message: Message, state: FSMContext) -> None:
         "🖥 Пришли <b>публичный IP</b> новой ноды. Можно через пробел добавить имя:\n"
         "<code>203.0.113.10 eu-frankfurt-02</code>\n\n"
         "По умолчанию образ marzban-node — зафиксированная стабильная версия, "
-        "xray-core — пин из node/XRAY_VERSION. Ключевые слова (в любом месте, "
-        "через пробел), чтобы взять свежее:\n"
+        "xray-core — пин из node/XRAY_VERSION (может быть pre-release). "
+        "Ключевые слова (в любом месте, через пробел):\n"
         "• <code>latest</code> — образ marzban-node :latest\n"
-        "• <code>xraylatest</code> — xray-core последний тег с GitHub (xray-core "
-        "выходит часто, пин может отставать)\n"
-        "<code>203.0.113.10 eu-frankfurt-02 xraylatest</code>\n\n"
+        "• <code>xraystable</code> — xray-core последняя СТАБИЛЬНАЯ (не pre-release) "
+        "с GitHub — шире совместимость со старыми клиентами (TV-приложения и т.п.)\n"
+        "• <code>xraylatest</code> — xray-core последний тег вообще, включая pre-release\n"
+        "<code>203.0.113.10 eu-frankfurt-02 xraystable</code>\n\n"
         "VPS должен быть чистым (Ubuntu/Debian), root-доступ понадобится тебе — "
         "не мне и не боту, я его не спрашиваю."
     )
@@ -1106,6 +1107,8 @@ async def add_server_input(message: Message, state: FSMContext) -> None:
             image_channel = "latest"
         elif low == "xraylatest":
             xray_channel = "latest"
+        elif low == "xraystable":
+            xray_channel = "laststable"
         else:
             filtered.append(t)
     rest = filtered
@@ -1144,8 +1147,12 @@ async def add_server_input(message: Message, state: FSMContext) -> None:
     )
     image_note = "образ marzban-node: :latest (выбрано вручную)" if image_channel == "latest" \
         else "образ marzban-node: зафиксированная стабильная версия"
-    xray_note = "xray-core: последний тег с GitHub (выбрано вручную)" if xray_channel == "latest" \
-        else "xray-core: пин из node/XRAY_VERSION"
+    if xray_channel == "latest":
+        xray_note = "xray-core: последний тег с GitHub, включая pre-release (выбрано вручную)"
+    elif xray_channel == "laststable":
+        xray_note = "xray-core: последняя СТАБИЛЬНАЯ с GitHub, без pre-release (выбрано вручную)"
+    else:
+        xray_note = "xray-core: пин из node/XRAY_VERSION"
     await message.answer(
         f"✅ Нода id={reg['node_id']} зарегистрирована в панели ({address}).\n"
         f"Токен живёт {ttl_min} мин, одноразовый. {image_note}, {xray_note}.\n\n"
@@ -1537,9 +1544,10 @@ def _xray_pin() -> str:
 
 
 async def _github_latest_xray_version() -> str | None:
-    """Живой запрос к GitHub API — не полагаемся на node/XRAY_VERSION, тот
-    пин обновляется руками и xray-core выходит часто (см. node/DISASTER_RECOVERY.md
-    контекст в чате: залипание на старом пине уже путали с сетевыми проблемами)."""
+    """Живой запрос к GitHub API (последний тег ВООБЩЕ, включая pre-release) —
+    не полагаемся на node/XRAY_VERSION, тот пин обновляется руками и
+    xray-core выходит часто (см. контекст в чате: залипание на старом пине
+    уже путали с сетевыми проблемами)."""
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
@@ -1555,6 +1563,28 @@ async def _github_latest_xray_version() -> str | None:
         return None
 
 
+async def _github_latest_stable_xray_version() -> str | None:
+    """/releases/latest у GitHub сам отфильтровывает pre-release — в отличие
+    от простого 'первый тег в списке', который сейчас почти всегда
+    pre-release (XTLS месяцами не режет полноценных stable-релизов). Нужно
+    для клиентов вроде TV-приложений, которые не следят за pre-release и
+    ломаются на version skew, если сервер уехал слишком далеко вперёд —
+    см. обсуждение в чате про 'socks error event .../removing connection'."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.github.com/repos/XTLS/Xray-core/releases/latest",
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as r:
+                data = await r.json(content_type=None)
+                if r.status >= 400 or not data:
+                    return None
+                return data.get("tag_name")
+    except Exception:  # noqa: BLE001
+        log.exception("не смог получить latest STABLE xray-core с GitHub")
+        return None
+
+
 @router.callback_query(F.data == "srv:xrayup")
 async def cb_srv_xrayup(cb: CallbackQuery) -> None:
     try:
@@ -1566,8 +1596,10 @@ async def cb_srv_xrayup(cb: CallbackQuery) -> None:
         "🔄 Обновить xray-core на ВСЕХ подключённых нодах по SSH? Ядро на "
         "каждой ноде перезапустится — клиенты на ней разорвут соединение на "
         "пару секунд.\n\n"
-        "Стабильная — уже проверенный пин из node/XRAY_VERSION. Последняя — "
-        "живой запрос к GitHub, xray-core обновляется часто, пин мог отстать.",
+        "Наш пин — то, что сейчас в node/XRAY_VERSION (может быть pre-release). "
+        "Последняя стабильная — GitHub /releases/latest, без pre-release, "
+        "с ней совместимость шире (старые TV-приложения и т.п.). Последняя с "
+        "GitHub — самый свежий тег вообще, включая pre-release.",
         reply_markup=xray_channel_pick_kb(pin),
     )
     await cb.answer()
@@ -1581,6 +1613,12 @@ async def cb_srv_xrayver(cb: CallbackQuery) -> None:
             version = _xray_pin()
         except OSError:
             await cb.answer("node/XRAY_VERSION не найден", show_alert=True)
+            return
+    elif channel == "laststable":
+        await cb.answer("Спрашиваю GitHub (stable)…")
+        version = await _github_latest_stable_xray_version()
+        if not version:
+            await cb.message.answer("❌ Не смог получить последнюю стабильную версию с GitHub. Попробуй позже.")
             return
     else:
         await cb.answer("Спрашиваю GitHub…")

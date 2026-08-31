@@ -235,13 +235,18 @@ def servers_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 
 
 def xray_channel_pick_kb(pin: str) -> InlineKeyboardMarkup:
-    """Выбор канала ПЕРЕД апгрейдом: пин (то, что уже проверено — сохраняем
-    как явный вариант, не только рефлекс на новый релиз) или живой latest с
-    GitHub (версия резолвится по кнопке, не заранее — тег может смениться
-    между показом меню и нажатием)."""
+    """Выбор канала ПЕРЕД апгрейдом. "Наш пин" — то, что сейчас зафиксировано
+    в node/XRAY_VERSION, но это НЕ обязательно stable-релиз (XTLS последние
+    месяцы почти все теги шлёт как pre-release, наш пин мог укатиться за
+    ними). "Последняя стабильная" — GitHub /releases/latest, который сам
+    отфильтровывает pre-release — для клиентов (TV-приложения и т.п.),
+    которые не следят за pre-release тегами и ломаются на versoin skew.
+    Версии резолвятся по кнопке, не заранее — теги могут смениться между
+    показом меню и нажатием."""
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"📌 Стабильная ({pin})", callback_data="srv:xrayver:stable")
-    kb.button(text="🆕 Последняя с GitHub", callback_data="srv:xrayver:latest")
+    kb.button(text=f"📌 Наш пин ({pin})", callback_data="srv:xrayver:stable")
+    kb.button(text="🏛 Последняя стабильная (не pre-release)", callback_data="srv:xrayver:laststable")
+    kb.button(text="🆕 Последняя с GitHub (включая pre-release)", callback_data="srv:xrayver:latest")
     kb.button(text="✖️ Отмена", callback_data="srv:list")
     kb.adjust(1)
     return kb.as_markup()
