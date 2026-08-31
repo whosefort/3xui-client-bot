@@ -339,6 +339,8 @@ def reality_menu_kb(ru_block_on: bool = False) -> InlineKeyboardMarkup:
     kb.button(text="🔌 Порт", callback_data="rl:port")
     kb.button(text="🕸 SpiderX", callback_data="rl:spx")
     kb.button(text="🫆 Фингерпринт (все ноды)", callback_data="rl:fp")
+    kb.button(text="🧩 Fragment: включить на всех", callback_data="rl:fragall:on")
+    kb.button(text="🧩 Fragment: выключить на всех", callback_data="rl:fragall:off")
     kb.button(
         text=("🇷🇺 Блок .ru/.su на ноде: выключить" if ru_block_on else "🇷🇺 Блок .ru/.su на ноде: включить"),
         callback_data="rl:rublocktoggle",

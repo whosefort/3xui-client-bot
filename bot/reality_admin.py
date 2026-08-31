@@ -235,6 +235,32 @@ async def set_host_fragment(tag: str, index: int, enabled: bool) -> None:
                 raise RealityError(f"не смог сохранить fragment ({r.status}): {res}")
 
 
+async def set_fragment_all(enabled: bool) -> int:
+    """Fragment/noise разом на ВСЕ хосты во всех инбаундах — тот же паттерн,
+    что set_fingerprint_all. Возвращает число изменённых записей."""
+    async with config_lock, aiohttp.ClientSession() as s:
+        token = await _marzban_auth(s)
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
+            hosts = await r.json(content_type=None)
+            if r.status >= 400:
+                raise RealityError(f"не смог получить хосты ({r.status}): {hosts}")
+        changed = 0
+        for entries in hosts.values():
+            for h in entries:
+                new_frag = FRAGMENT_DEFAULT if enabled else None
+                if h.get("fragment_setting") != new_frag:
+                    h["fragment_setting"] = new_frag
+                    h["noise_setting"] = NOISE_DEFAULT if enabled else None
+                    changed += 1
+        if changed:
+            async with s.put(f"{config.marzban_url}/api/hosts", json=hosts, headers=headers) as r:
+                res = await r.json(content_type=None)
+                if r.status >= 400:
+                    raise RealityError(f"не смог сохранить fragment ({r.status}): {res}")
+    return changed
+
+
 # Marzban ProxyHostFingerprint enum, без "android" — по опыту рунета это
 # конкретно тот отпечаток, который чаще палится (андроид-стек TLS менее
 # распространён среди обычного веб-трафика, выделяется на общем фоне).

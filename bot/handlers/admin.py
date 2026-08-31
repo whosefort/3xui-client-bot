@@ -2177,6 +2177,23 @@ async def cb_rl_fppick(cb: CallbackQuery) -> None:
     await cb.message.answer(f"✅ Фингерпринт <code>{html.escape(fp)}</code> применён на {changed} серверах.")
 
 
+@router.callback_query(F.data.startswith("rl:fragall:"))
+async def cb_rl_fragall(cb: CallbackQuery) -> None:
+    enabled = cb.data.split(":", 2)[2] == "on"
+    await cb.answer()
+    try:
+        changed = await reality_admin.set_fragment_all(enabled)
+    except reality_admin.RealityError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("cb_rl_fragall failed")
+        await cb.message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+    state_word = "включён" if enabled else "выключен"
+    await cb.message.answer(f"✅ Fragment {state_word} на {changed} серверах.")
+
+
 # ---------- WARP (ручная маршрутизация отдельных доменов) ----------
 
 def _warp_tag(address: str) -> str:
