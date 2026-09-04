@@ -361,6 +361,7 @@ def reality_port_picker_kb(options: list[int]) -> InlineKeyboardMarkup:
 
 def reality_menu_kb(ru_block_on: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    kb.button(text="🚨 Экстренная ротация всего", callback_data="rl:panic")
     kb.button(text="🔄 Сменить SNI (домен)", callback_data="rl:sni")
     kb.button(text="🔍 Найти SNI-домены (скан)", callback_data="rl:scan")
     kb.button(text="🔑 Перегенерить ключи", callback_data="rl:keys")
@@ -469,6 +470,19 @@ def reality_scan_results_kb(domains: list[str], show_scan: bool = False) -> Inli
     if show_scan:
         kb.button(text="🔍 Просканировать ещё", callback_data="rl:scan")
     kb.button(text="✏️ Свой домен", callback_data="rl:snimanual")
+    kb.button(text="✖️ Отмена", callback_data="rl:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def reality_panic_pick_kb(domains: list[str]) -> InlineKeyboardMarkup:
+    """Отдельный callback-префикс от reality_scan_results_kb — выбор здесь
+    запускает panic_rotate (ключи+shortId+SNI разом), не просто смену SNI."""
+    kb = InlineKeyboardBuilder()
+    for d in domains:
+        cb = f"rl:panicpick:{d}"
+        if len(cb.encode()) <= 64:
+            kb.button(text=d, callback_data=cb)
     kb.button(text="✖️ Отмена", callback_data="rl:menu")
     kb.adjust(1)
     return kb.as_markup()

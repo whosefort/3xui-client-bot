@@ -26,7 +26,8 @@ from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
                          confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
-                         reality_fp_picker_kb, reality_menu_kb, reality_port_picker_kb,
+                         reality_fp_picker_kb, reality_menu_kb, reality_panic_pick_kb,
+                         reality_port_picker_kb,
                          reality_scan_results_kb, reality_sids_kb, reality_spx_picker_kb,
                          reality_sni_result_kb,
                          server_card_kb, server_fp_picker_kb, server_sni_picker_kb,
@@ -1896,7 +1897,19 @@ async def _reality_menu_text() -> tuple[str, bool]:
         f"{ru_line}\n\n"
         f"Правки применяются сразу на весь кластер (общий конфиг), без "
         f"грейс-периода — старые ключи/shortId перестают работать немедленно. "
-        f"Подписка генерируется на лету, отдельно рассылать новые ссылки не надо."
+        f"Подписка генерируется на лету, отдельно рассылать новые ссылки не надо.\n\n"
+        f"<b>Когда что менять:</b>\n"
+        f"🔑 Ключи / 🆔 shortId — подозреваешь, что подписка/сервер конкретно "
+        f"спалились (утечка, детект конкретным приложением-блокировщиком). "
+        f"Рвёт ВСЕХ клиентов сразу — не для профилактики.\n"
+        f"🔄 SNI — конкретный домен-камуфляж стал палевным (DPI начал резать "
+        f"именно его у многих провайдеров) или жалобы именно на одну ноду — "
+        f"тогда точечно через 🌍 Серверы → нода → «Свой SNI».\n"
+        f"🕸 SpiderX — почти никогда не нужно трогать само по себе; меняй, "
+        f"только если знаешь зачем (подгоняешь под реальную структуру "
+        f"сайта-камуфляжа). Не панацея и не связана с банами.\n"
+        f"🚨 Если не уверен, с чего начать при массовых жалобах — жми кнопку "
+        f"ниже: она разом меняет ключи+shortId+SNI и проверяет туннели."
     )
     return text, ru_block_on
 
@@ -1941,6 +1954,70 @@ async def cb_rl_rublocktoggle(cb: CallbackQuery) -> None:
     text, ru_block_on = await _reality_menu_text()
     await cb.message.edit_text(text, reply_markup=reality_menu_kb(ru_block_on))
     await cb.answer()
+
+
+@router.callback_query(F.data == "rl:panic")
+async def cb_rl_panic(cb: CallbackQuery) -> None:
+    await cb.answer()
+    await cb.message.answer("🔄 Проверяю варианты SNI перед ротацией…")
+    validated = await reality_admin.validate_candidates(reality_admin.SUGGESTED_DOMAINS)
+    if not validated:
+        await cb.message.answer(
+            "Ни один из обычных вариантов сейчас не прошёл проверку — "
+            "отменяю, попробуй позже или смени SNI вручную сначала."
+        )
+        return
+    await cb.message.answer(
+        "🚨 <b>Экстренная ротация</b>: новые ключи + новый набор shortId + новый "
+        "общий SNI — ОДНИМ действием на весь кластер. Порвёт вообще ВСЕХ "
+        "клиентов сразу, без исключений. Если у нод были свои отдельные SNI "
+        "(🌍 Серверы → нода) — они сбросятся на этот общий, придётся выставить "
+        "заново вручную.\n\n"
+        "Выбери новый SNI (уже прошли проверку):",
+        reply_markup=reality_panic_pick_kb(validated),
+    )
+
+
+@router.callback_query(F.data.startswith("rl:panicpick:"))
+async def cb_rl_panicpick(cb: CallbackQuery) -> None:
+    domain = cb.data.split(":", 2)[2]
+    await cb.answer()
+    await cb.message.edit_text(f"🚨 Ротирую всё на <code>{html.escape(domain)}</code>…")
+    try:
+        await reality_admin.panic_rotate(domain)
+    except reality_admin.RealityError as e:
+        await cb.message.answer(f"❌ Не удалось: {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("cb_rl_panicpick failed")
+        await cb.message.answer("❌ Ошибка при обращении к панели. См. логи.")
+        return
+
+    lines = ["✅ Ключи/shortId/SNI обновлены. Проверяю туннели на всех нодах…"]
+    await cb.message.answer("\n".join(lines))
+    try:
+        nodes = await node_provision.list_nodes()
+    except node_provision.ProvisionError as e:
+        await cb.message.answer(f"⚠️ Ротация прошла, но не смог получить список нод для проверки: {e}")
+        nodes = []
+    results = []
+    for n in nodes:
+        name, address = n.get("name", "?"), n.get("address", "")
+        try:
+            client = await node_provision.create_verify_client()
+        except node_provision.ProvisionError as e:
+            results.append(f"❌ {html.escape(name)}: не смог создать тестового клиента — {e}")
+            continue
+        try:
+            ok = await ssh_ops.verify_reality_tunnel(address, client)
+            results.append(f"{'✅' if ok else '❌'} {html.escape(name)} ({html.escape(address)})")
+        except ssh_ops.SSHOpError as e:
+            results.append(f"❌ {html.escape(name)} ({html.escape(address)}): {html.escape(str(e))}")
+        finally:
+            await node_provision.delete_verify_client(client["username"])
+    await cb.message.answer("Готово:\n" + ("\n".join(results) if results else "нод нет"))
+    text, ru_block_on = await _reality_menu_text()
+    await cb.message.answer(text, reply_markup=reality_menu_kb(ru_block_on))
 
 
 @router.callback_query(F.data == "rl:sni")
