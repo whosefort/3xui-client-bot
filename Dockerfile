@@ -21,6 +21,9 @@ COPY bot/ ./bot/
 COPY node/XRAY_VERSION ./node/XRAY_VERSION
 COPY node/MARZBAN_NODE_IMAGE ./node/MARZBAN_NODE_IMAGE
 COPY node/upgrade_xray.sh ./node/upgrade_xray.sh
+# База Happ routing-профиля — бот дописывает к ней свои direct-домены и
+# выкладывает результат Caddy (bot/happ_routing.py).
+COPY panel/happ_routing.deeplink ./panel/happ_routing.deeplink
 
 # Непривилегированный пользователь (uid 10001). Контейнер не работает от root,
 # чтобы при компрометации зависимости минимизировать радиус поражения на host

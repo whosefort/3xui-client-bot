@@ -24,6 +24,10 @@ services:
       # Если каталога нет — бот просто не поднимет TLS на порту провижининга
       # (см. bot/http_api.py), сама панель этим не затронута.
       - ${MARZBAN_CERT_DIR:-/var/lib/marzban/certs}:/app/marzban-certs:ro
+      # Happ routing-профиль: бот пишет сюда готовый deeplink, Caddy читает
+      # его плейсхолдером {file.…} на каждый запрос (bot/happ_routing.py).
+      # Каталог создаёт deploy.sh (владелец uid 10001, читается всеми).
+      - ${HAPP_ROUTING_DIR:-/var/lib/happ-routing}:/app/routing
     # Если панель слушает на localhost хоста (127.0.0.1) — даём боту доступ
     # к сети хоста, чтобы XUI_BASE_URL мог быть http://127.0.0.1:PORT/...
     network_mode: host

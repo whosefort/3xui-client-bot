@@ -376,7 +376,20 @@ def reality_menu_kb(ru_block_on: bool = False) -> InlineKeyboardMarkup:
         callback_data="rl:rublocktoggle",
     )
     kb.button(text="🌐 WARP", callback_data="rl:warp")
+    kb.button(text="↪️ Direct-домены (в обход VPN)", callback_data="rl:direct")
     kb.button(text="✖️ Закрыть", callback_data="rl:close")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def direct_domains_kb(domains: list[str]) -> InlineKeyboardMarkup:
+    """Только СВОИ домены (добавленные из бота) — базовый профиль отсюда не
+    правится. Удаление по индексу: домен в callback_data мог бы не влезть в 64 байта."""
+    kb = InlineKeyboardBuilder()
+    for i, d in enumerate(domains):
+        kb.button(text=f"🗑 {d}", callback_data=f"rl:directrm:{i}")
+    kb.button(text="➕ Добавить домены", callback_data="rl:directadd")
+    kb.button(text="↩️ Назад", callback_data="rl:menu")
     kb.adjust(1)
     return kb.as_markup()
 

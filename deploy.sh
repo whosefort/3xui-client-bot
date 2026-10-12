@@ -439,6 +439,13 @@ fi
 # ─── права на файлы ───────────────────────────────────────────────────────────
 chmod 600 .env
 mkdir -p data && chmod 700 data
+# Общий каталог для Happ routing-профиля: пишет бот (uid 10001), читает Caddy
+# (свой системный юзер) — поэтому 755/644, а не 700 как у data/. Без mkdir
+# Docker создал бы его сам от root, и бот не смог бы туда писать.
+HAPP_ROUTING_DIR="$(grep -E '^HAPP_ROUTING_DIR=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+HAPP_ROUTING_DIR="${HAPP_ROUTING_DIR:-/var/lib/happ-routing}"
+mkdir -p "$HAPP_ROUTING_DIR" 2>/dev/null && chmod 755 "$HAPP_ROUTING_DIR" \
+    && chown 10001:10001 "$HAPP_ROUTING_DIR" 2>/dev/null || true
 # Контейнер работает от uid 10001 (non-root) — отдаём ему владение data/,
 # иначе он не сможет писать SQLite в смонтированный том.
 chown -R 10001:10001 data 2>/dev/null \

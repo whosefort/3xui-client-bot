@@ -9,7 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from . import db, http_api, runtime
+from . import db, happ_routing, http_api, runtime
 from .config import config
 from .handlers import setup_routers
 from .panels import build_panel
@@ -25,6 +25,16 @@ log = logging.getLogger("main")
 async def main() -> None:
     config.validate()
     db.init(config.db_path)
+
+    # Свежая база профиля из репо + свои direct-домены из БД -> файл для Caddy.
+    # Не роняем бота, если общий каталог не примонтирован (например xui-режим
+    # без Caddy вообще) — просто не будет заголовка routing.
+    try:
+        happ_routing.publish()
+        log.info("Happ routing-профиль выложен (%d своих direct-доменов)",
+                 len(happ_routing.custom_domains()))
+    except happ_routing.RoutingError as e:
+        log.warning("Happ routing-профиль не выложен: %s", e)
 
     runtime.panel = build_panel()
     log.info("Бэкенд панели: %s", config.panel_backend)

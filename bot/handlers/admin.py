@@ -21,11 +21,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from .. import db, keyboards as kb, node_provision, reality_admin, reality_scan, ssh_ops, texts, warp, warp_admin
+from .. import db, happ_routing, keyboards as kb, node_provision, reality_admin, reality_scan, ssh_ops, texts, warp, warp_admin
 from ..config import config
 from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          broadcast_target_kb, client_card_kb, clients_list_kb,
-                         confirm_delete_kb, confirm_unlimited_kb, reality_confirm_kb,
+                         confirm_delete_kb, confirm_unlimited_kb, direct_domains_kb,
+                         reality_confirm_kb,
                          reality_fp_picker_kb, reality_menu_kb, reality_panic_pick_kb,
                          reality_port_picker_kb,
                          reality_scan_results_kb, reality_sids_kb, reality_spx_picker_kb,
@@ -70,6 +71,7 @@ class AdminFSM(StatesGroup):
     reality_port = State()       # ждём новый порт REALITY-инбаунда
     reality_spx = State()        # ждём новый SpiderX-путь
     warp_domain = State()        # ждём домен для ручной маршрутизации через WARP
+    direct_domains = State()     # ждём свои домены для direct-списка Happ-профиля
 
 
 # ---------- форматирование ----------
@@ -2635,6 +2637,94 @@ async def cb_rl_warp_domrm(cb: CallbackQuery) -> None:
         await cb.message.answer(f"❌ Не удалось: {e}")
         return
     await _warp_node_screen(cb, address)
+
+
+# ---------- свои direct-домены в Happ routing-профиле ----------
+
+def _direct_text(custom: list[str]) -> str:
+    try:
+        base = happ_routing.base_direct()
+    except happ_routing.RoutingError as e:
+        base = [f"(не прочитан: {e})"]
+    mine = "\n".join(f"• <code>{html.escape(d)}</code>" for d in custom) or "— пока пусто"
+    return (
+        "↪️ <b>Direct-домены</b> — идут у клиента напрямую, мимо VPN "
+        "(Happ routing-профиль, заголовок <code>routing</code> на sub.-домене).\n\n"
+        f"<b>Свои ({len(custom)}):</b>\n{mine}\n\n"
+        f"<b>База из репо ({len(base)}), отсюда не правится:</b>\n"
+        f"<code>{html.escape(', '.join(base))}</code>\n\n"
+        "Применяется сразу, без перезапусков. Клиент подхватит при следующем "
+        "обновлении подписки в приложении. Домен покрывает и свои поддомены."
+    )
+
+
+async def _direct_screen(message: Message, edit: bool) -> None:
+    custom = happ_routing.custom_domains()
+    text, markup = _direct_text(custom), direct_domains_kb(custom)
+    if edit:
+        await _safe_edit(message, text, reply_markup=markup)
+    else:
+        await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "rl:direct")
+async def cb_rl_direct(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cb.answer()
+    await _direct_screen(cb.message, edit=True)
+
+
+@router.callback_query(F.data == "rl:directadd")
+async def cb_rl_directadd(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminFSM.direct_domains)
+    await cb.message.answer(
+        "Пришли домены, которые пускать напрямую — можно несколько сразу, через "
+        "пробел, запятую или с новой строки. Ссылку целиком тоже пойму:\n"
+        "<code>zoom.us, https://kontur.ru/talk</code>\n"
+        "Отмена — любая кнопка снизу."
+    )
+    await cb.answer()
+
+
+@router.message(AdminFSM.direct_domains, F.text)
+async def direct_domains_input(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    good, bad = happ_routing.normalize(message.text or "")
+    if not good:
+        await message.answer("Не нашёл ни одного домена. Отменено.")
+        return
+    try:
+        added, skipped = happ_routing.add(good)
+    except happ_routing.RoutingError as e:
+        await message.answer(f"❌ Не удалось: {html.escape(str(e))}")
+        return
+    lines = []
+    if added:
+        lines.append("✅ Добавлено: " + ", ".join(f"<code>{html.escape(d)}</code>" for d in added))
+    if skipped:
+        lines.append("↪️ Уже были: " + ", ".join(f"<code>{html.escape(d)}</code>" for d in skipped))
+    if bad:
+        lines.append("⚠️ Не похоже на домен: " + ", ".join(html.escape(b) for b in bad))
+    await message.answer("\n".join(lines))
+    await _direct_screen(message, edit=False)
+
+
+@router.callback_query(F.data.startswith("rl:directrm:"))
+async def cb_rl_directrm(cb: CallbackQuery) -> None:
+    idx_s = cb.data.split(":", 2)[2]
+    custom = happ_routing.custom_domains()
+    if not idx_s.isdigit() or int(idx_s) >= len(custom):
+        await cb.answer("Список изменился, открой заново", show_alert=True)
+        await _direct_screen(cb.message, edit=True)
+        return
+    domain = custom[int(idx_s)]
+    try:
+        happ_routing.remove(domain)
+    except happ_routing.RoutingError as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    await cb.answer(f"Убрал {domain}")
+    await _direct_screen(cb.message, edit=True)
 
 
 # ---------- утилиты ----------

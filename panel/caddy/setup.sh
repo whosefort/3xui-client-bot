@@ -110,22 +110,24 @@ chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-caddy.sh
 ok "Deploy-hook на продление настроен"
 
 # ─── 7. Caddyfile из шаблона ──────────────────────────────────────────────────
-# Happ per-subscription routing (см. ../happ_routing.deeplink) — если пин-файла
-# нет, просто убираем строку с заголовком целиком, а не оставляем пустое значение.
+# Happ per-subscription routing: Caddy читает deeplink из файла на каждый
+# запрос, файл пересобирает бот (bot/happ_routing.py). Здесь только готовим
+# общий каталог и кладём базовый профиль как затравку — чтобы заголовок был
+# непустым ещё до первого старта бота. Владелец — uid 10001 (контейнер бота).
 HAPP_ROUTING_FILE="$SCRIPT_DIR/../happ_routing.deeplink"
+HAPP_ROUTING_DIR=/var/lib/happ-routing
 sed \
     -e "s#__MON_DOMAIN__#${MON_DOMAIN}#g" \
     -e "s#__SUB_DOMAIN__#${SUB_DOMAIN}#g" \
     -e "s#__MON_CERT_DIR__#${MON_CERT_DIR}#g" \
     "$SCRIPT_DIR/Caddyfile.tmpl" > /etc/caddy/Caddyfile
-if [ -f "$HAPP_ROUTING_FILE" ]; then
-    HAPP_ROUTING="$(tr -d '[:space:]' < "$HAPP_ROUTING_FILE")"
-    sed -i "s#__HAPP_ROUTING__#${HAPP_ROUTING}#g" /etc/caddy/Caddyfile
-    ok "Happ routing-профиль подставлен из happ_routing.deeplink"
-else
-    sed -i '/header routing "__HAPP_ROUTING__"/d' /etc/caddy/Caddyfile
-    warn "panel/happ_routing.deeplink не найден — заголовок routing не добавлен"
+mkdir -p "$HAPP_ROUTING_DIR" && chmod 755 "$HAPP_ROUTING_DIR"
+if [ ! -s "$HAPP_ROUTING_DIR/happ_routing.deeplink" ] && [ -f "$HAPP_ROUTING_FILE" ]; then
+    tr -d '[:space:]' < "$HAPP_ROUTING_FILE" > "$HAPP_ROUTING_DIR/happ_routing.deeplink"
+    ok "Базовый Happ routing-профиль положен в $HAPP_ROUTING_DIR"
 fi
+chown -R 10001:10001 "$HAPP_ROUTING_DIR"
+chmod 644 "$HAPP_ROUTING_DIR"/happ_routing.deeplink 2>/dev/null || true
 caddy validate --config /etc/caddy/Caddyfile || die "Caddyfile не прошёл валидацию"
 ok "Caddyfile сгенерирован и провалидирован"
 
