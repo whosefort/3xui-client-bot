@@ -37,14 +37,28 @@ certbot renew --dry-run                   # проверить, что авто�
 
 Happ переехал на роутинг, привязанный к конкретной подписке — без готового
 профиля от провайдера клиенту приходится настраивать bypass-правила в
-приложении руками. `setup.sh` сам подставляет заголовок `routing` на sub.-
-домене из `../happ_routing.deeplink` (уже готовый `happ://routing/onadd/...`,
-взят из [roscomvpn-routing](https://github.com/hydraponique/roscomvpn-routing) —
-RU/BY напрямую, YouTube/Telegram/GitHub через прокси, реклама/торренты/
-телеметрия блокируются). Файла нет — заголовок просто не добавляется, ничего
-не ломается. Обновить профиль: скачать свежий `HAPP/DEFAULT.DEEPLINK` из
-репозитория выше и заменить содержимое `panel/happ_routing.deeplink`, потом
-`bash setup.sh` заново (идемпотентно).
+приложении руками. Поэтому sub.-домен отдаёт заголовок `routing` с готовым
+`happ://routing/onadd/...`.
+
+Значение не впаяно в Caddyfile: Caddy читает его из
+`/var/lib/happ-routing/happ_routing.deeplink` на каждый запрос (плейсхолдер
+`{file.…}`, нужен Caddy >= 2.8), а сам файл пересобирает бот
+(`bot/happ_routing.py`) при старте и после каждой правки:
+
+- **база** — `panel/happ_routing.deeplink` из репо (основа из
+  [roscomvpn-routing](https://github.com/hydraponique/roscomvpn-routing):
+  RU/BY и торренты напрямую, YouTube/Telegram/GitHub через прокси,
+  реклама/телеметрия блокируются);
+- **свои direct-домены** — добавляются в админке бота: 🛡 Соединение →
+  ↪️ Direct-домены. Хранятся в БД бота отдельно от базы, обновление базы их
+  не затирает.
+
+Ни reload Caddy, ни SSH для правки списка не нужны. Обновить базу: заменить
+`panel/happ_routing.deeplink` и передеплоить бота (`./deploy.sh`) — он
+выложит свежий файл при старте. Каталог `/var/lib/happ-routing` (владелец
+uid 10001, читается всеми) создают `setup.sh` и `deploy.sh`; `setup.sh`
+кладёт туда базу как затравку, чтобы заголовок был непустым ещё до первого
+старта бота.
 
 ## ⚠️ Готча: `certbot renew` виснет / отдаёт 404 на challenge-путь
 
