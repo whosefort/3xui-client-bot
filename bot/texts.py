@@ -99,11 +99,21 @@ def faq_answer(item_id: str) -> str | None:
     return None
 
 
+def _subs(sub_url) -> str:
+    """Одна ссылка или несколько (PANELS из нескольких панелей)."""
+    urls = [u for u in (sub_url if isinstance(sub_url, (list, tuple)) else [sub_url]) if u]
+    if len(urls) <= 1:
+        return f"🔗 Ваша ссылка-подписка:\n<code>{urls[0] if urls else '—'}</code>"
+    body = "\n".join(f"{i}. <code>{u}</code>" for i, u in enumerate(urls, 1))
+    return ("🔗 Ваши ссылки-подписки (разные серверы — добавьте <b>обе</b> в Happ, "
+            f"каждую отдельно):\n{body}")
+
+
 def status_active(days: int, sub_url: str) -> str:
     return (
         f"✅ <b>Подписка активна</b>\n"
         f"Осталось дней: <b>{days}</b>\n\n"
-        f"🔗 Ваша ссылка-подписка:\n<code>{sub_url}</code>\n\n"
+        f"{_subs(sub_url)}\n\n"
         f"Добавьте её в приложение <b>Happ</b> — и всё заработает.\n\n"
         f"Не грузится? Кнопка «⚠️ Подписка не подгружается?» ниже."
     )
@@ -112,7 +122,7 @@ def status_active(days: int, sub_url: str) -> str:
 def status_unlimited(sub_url: str) -> str:
     return (
         f"✅ <b>Подписка активна</b> (бессрочно)\n\n"
-        f"🔗 Ваша ссылка-подписка:\n<code>{sub_url}</code>\n\n"
+        f"{_subs(sub_url)}\n\n"
         f"Не грузится? Кнопка «⚠️ Подписка не подгружается?» ниже."
     )
 
@@ -144,7 +154,7 @@ def setup_step1() -> str:
 def setup_step2(sub_url: str) -> str:
     return (
         "📲 <b>Шаг 2 из 3 — импорт подписки</b>\n\n"
-        f"Нажмите на ссылку ниже, чтобы скопировать:\n<code>{sub_url}</code>\n\n"
+        f"Нажмите на ссылку ниже, чтобы скопировать:\n{_subs(sub_url)}\n\n"
         "В Happ: «+» в углу экрана → «Добавить из буфера обмена» "
         "(Add from clipboard) — подписка добавится сама."
     )
@@ -255,7 +265,7 @@ def reminder(days: int) -> str:
 def new_subscription_issued(days: int, sub_url: str) -> str:
     return (
         f"🎉 <b>Готово! Подписка на {days} дней активна.</b>\n\n"
-        f"🔗 Ваша ссылка-подписка:\n<code>{sub_url}</code>\n\n"
+        f"{_subs(sub_url)}\n\n"
         f"{setup_intro()}"
     )
 

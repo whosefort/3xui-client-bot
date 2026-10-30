@@ -27,6 +27,12 @@ class Client:
     used_bytes: int = 0
     limit_bytes: int = 0                # 0 = безлимит
     raw: dict = field(default_factory=dict)  # сырой объект бэкенда (для отладки)
+    # Ссылки вторичных панелей (PANELS из нескольких) — клиент получает все.
+    extra_subs: list = field(default_factory=list)
+
+    @property
+    def all_subs(self) -> list:
+        return [u for u in [self.sub_url, *self.extra_subs] if u]
 
     @property
     def days_left(self) -> Optional[int]:

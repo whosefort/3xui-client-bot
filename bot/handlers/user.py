@@ -84,9 +84,9 @@ async def cb_status(cb: CallbackQuery) -> None:
         # а VPN не работает (ровно та путаница, ради которой делался бот).
         text = texts.status_exhausted()
     elif days is None:
-        text = texts.status_unlimited(cl.sub_url)
+        text = texts.status_unlimited(cl.all_subs)
     else:
-        text = texts.status_active(days, cl.sub_url)
+        text = texts.status_active(days, cl.all_subs)
     await cb.message.edit_text(text, reply_markup=status_kb())
     await cb.answer()
 
@@ -134,7 +134,7 @@ async def cb_setup_2(cb: CallbackQuery) -> None:
     if not cl:
         await cb.answer("Подписка не найдена", show_alert=True)
         return
-    await cb.message.edit_text(texts.setup_step2(cl.sub_url), reply_markup=setup_step2_kb())
+    await cb.message.edit_text(texts.setup_step2(cl.all_subs), reply_markup=setup_step2_kb())
     await cb.answer()
 
 

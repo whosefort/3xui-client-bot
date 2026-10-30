@@ -145,13 +145,13 @@ async def run_backup() -> str:
         # в docker-compose туда подставлен /dev/null (не regular file) — тогда
         # просто пропускаем, без ошибок и без риска создать «битую» директорию.
         sources = [("bot", config.db_path)]
-        if config.panel_backend == "marzban":
+        if config.uses("marzban"):
             if os.path.isfile(MARZBAN_DB_PATH) and os.path.getsize(MARZBAN_DB_PATH) > 0:
                 sources.append(("marzban", MARZBAN_DB_PATH))
             else:
                 log.warning("marzban db.sqlite3 недоступен (%s, задай MARZBAN_DB_HOST_PATH) — "
                            "бэкаплю только bot.db", MARZBAN_DB_PATH)
-        else:
+        if config.uses("xui"):
             if os.path.isfile(XUI_DB_PATH) and os.path.getsize(XUI_DB_PATH) > 0:
                 sources.append(("x-ui", XUI_DB_PATH))
             else:

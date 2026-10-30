@@ -246,7 +246,7 @@ async def _approve_new(req) -> None:
     created = await panel.create_client(
         tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
     db.upsert_user(tg_id, req["tg_username"], client_email=created.username, sub_id=created.sub_url)
-    await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.sub_url),
+    await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.all_subs),
                          reply_markup=setup_start_kb())
 
 
@@ -500,7 +500,7 @@ async def cb_cli_lnk(cb: CallbackQuery) -> None:
                   + "\n".join(f"<code>{html.escape(lk)}</code>" for lk in links)) if links else ""
     await cb.message.answer(
         f"🔗 Ссылка-подписка <b>{html.escape(_label(cl, db.usernames_map()))}</b>:\n"
-        f"<code>{cl.sub_url}</code>{links_block}"
+        + "\n".join(f"<code>{html.escape(u)}</code>" for u in cl.all_subs) + links_block
     )
     await cb.answer()
 
@@ -770,7 +770,7 @@ async def _do_grant(tg_id: int) -> str:
         created = await panel.create_client(
             tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
         db.upsert_user(tg_id, uname, client_email=created.username, sub_id=created.sub_url)
-        await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.sub_url),
+        await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.all_subs),
                              reply_markup=setup_start_kb())
         return f"✅ Создана подписка для {tg_id}"
     except Exception:  # noqa: BLE001

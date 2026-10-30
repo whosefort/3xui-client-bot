@@ -5,9 +5,8 @@ from ..config import config
 from .base import Client, PanelClient, PanelError
 
 
-def build_panel() -> PanelClient:
-    """Собрать бэкенд по PANEL_BACKEND (xui | marzban)."""
-    if config.panel_backend == "marzban":
+def _build_one(kind: str) -> PanelClient:
+    if kind == "marzban":
         from .marzban import MarzbanClient
         return MarzbanClient(
             config.marzban_url, config.marzban_username, config.marzban_password,
@@ -22,6 +21,16 @@ def build_panel() -> PanelClient:
         twofa_secret=config.xui_2fa_secret, client_flow=config.client_flow,
         sub_url_template=config.sub_url_template, inbound_ids=config.default_inbound_ids,
     )
+
+
+def build_panel() -> PanelClient:
+    """PANELS=marzban,xui — несколько панелей, первая главная (bot/panels/multi.py).
+    Без PANELS — одна панель по PANEL_BACKEND, как раньше."""
+    kinds = config.panels
+    if len(kinds) == 1:
+        return _build_one(kinds[0])
+    from .multi import MultiPanel
+    return MultiPanel([(k, _build_one(k)) for k in kinds])
 
 
 __all__ = ["Client", "PanelClient", "PanelError", "build_panel"]

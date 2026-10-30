@@ -60,6 +60,11 @@ class Config:
 
     # Выбор бэкенда панели: xui | marzban
     panel_backend: str = os.getenv("PANEL_BACKEND", "xui").strip().lower()
+    # Несколько панелей разом: PANELS=marzban,xui (первая — главная). Пусто —
+    # одна панель из PANEL_BACKEND. panel_backend ниже всегда = главная.
+    panels: list = field(default_factory=lambda: [
+        k.strip().lower() for k in os.getenv("PANELS", "").split(",") if k.strip()
+    ])
 
     # Marzban
     marzban_url: str = os.getenv("MARZBAN_URL", "").rstrip("/")
@@ -117,20 +122,31 @@ class Config:
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.admin_ids
 
+    def __post_init__(self) -> None:
+        if not self.panels:
+            self.panels = [self.panel_backend]
+        self.panel_backend = self.panels[0]
+
+    def uses(self, kind: str) -> bool:
+        return kind in self.panels
+
     def validate(self) -> None:
         missing = []
+        bad = [k for k in self.panels if k not in ("xui", "marzban")]
+        if bad:
+            missing.append(f"PANELS: неизвестные {bad} (можно xui, marzban)")
         if not self.bot_token:
             missing.append("BOT_TOKEN")
         if not self.admin_ids:
             missing.append("ADMIN_IDS")
-        if self.panel_backend == "marzban":
+        if self.uses("marzban"):
             if not self.marzban_url:
                 missing.append("MARZBAN_URL")
             if not self.marzban_username:
                 missing.append("MARZBAN_USERNAME")
             if not self.marzban_password:
                 missing.append("MARZBAN_PASSWORD")
-        else:
+        if self.uses("xui"):
             if not self.xui_base_url:
                 missing.append("XUI_BASE_URL")
             if self.xui_auth == "token" and not self.xui_api_token:
