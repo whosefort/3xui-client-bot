@@ -31,6 +31,7 @@ _BASE_PATH = os.path.join(
 )
 _OUT_PATH = os.getenv("HAPP_ROUTING_OUT", "/app/routing/happ_routing.deeplink")
 _SETTING_KEY = "direct_domains"
+_PROXY_SETTING_KEY = "proxy_domains"
 _DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
 # Заголовок целиком должен пролезать в типовые лимиты (8 КБ на строку
 # заголовка у большинства клиентов/прокси) — база ~1.7 КБ, остальное под свои.
@@ -61,13 +62,26 @@ def base_direct() -> list[str]:
     return list(_load_base().get("DirectSites", []))
 
 
-def custom_domains() -> list[str]:
-    raw = db.get_setting(_SETTING_KEY, "[]")
+def base_proxy() -> list[str]:
+    """ProxySites базового профиля — только показать админу, не для правки."""
+    return list(_load_base().get("ProxySites", []))
+
+
+def _custom(key: str) -> list[str]:
+    raw = db.get_setting(key, "[]")
     try:
         data = json.loads(raw)
     except ValueError:
         return []
     return [d for d in data if isinstance(d, str)]
+
+
+def custom_domains() -> list[str]:
+    return _custom(_SETTING_KEY)
+
+
+def custom_proxy_domains() -> list[str]:
+    return _custom(_PROXY_SETTING_KEY)
 
 
 def normalize(text: str) -> tuple[list[str], list[str]]:
@@ -89,12 +103,28 @@ def normalize(text: str) -> tuple[list[str], list[str]]:
     return good, bad
 
 
-def _build(custom: list[str]) -> str:
+def _build(custom: list[str], proxy: list[str] | None = None) -> str:
     data = _load_base()
+    # Гео-файлы Happ качает по URL из профиля; jsDelivr для части RU-клиентов
+    # недоступен/медленный (Happ рвёт загрузку по таймауту 3 мин). Если задан
+    # HAPP_GEO_BASE_URL (https://<sub-домен>/geo, см. panel/caddy/README.md),
+    # отдаём те же версии файлов со своего sub-домена — тот же хост, что и
+    # подписка, значит доступен гарантированно. Сами файлы на сервер кладёт
+    # panel/caddy/fetch_geo.sh по пинам из базового профиля.
+    geo_base = os.getenv("HAPP_GEO_BASE_URL", "").rstrip("/")
+    if geo_base:
+        data["Geoipurl"] = f"{geo_base}/geoip.dat"
+        data["Geositeurl"] = f"{geo_base}/geosite.dat"
     direct = data.setdefault("DirectSites", [])
     for d in custom:
         if d not in direct:
             direct.append(d)
+    if proxy is None:
+        proxy = custom_proxy_domains()
+    proxy_sites = data.setdefault("ProxySites", [])
+    for d in proxy:
+        if d not in proxy_sites:
+            proxy_sites.append(d)
     # Happ сравнивает LastUpdated, чтобы понять, что профиль сменился.
     data["LastUpdated"] = str(int(time.time()))
     payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
@@ -122,26 +152,26 @@ def _write(deeplink: str) -> None:
 def publish() -> None:
     """Пересобрать и выложить профиль. Зовётся на старте бота (чтобы свежая
     база из репо доехала после деплоя) и после каждой правки списка."""
-    _write(_build(custom_domains()))
+    _write(_build(custom_domains(), custom_proxy_domains()))
 
 
-def _save(domains: list[str]) -> None:
+def _save(direct: list[str], proxy: list[str], key: str) -> None:
     """Сначала собираем и пишем файл, и только потом сохраняем в БД — если
     запись сорвалась, список в боте не разойдётся с тем, что реально отдаётся."""
-    deeplink = _build(domains)
+    deeplink = _build(direct, proxy)
     if len(deeplink) > _MAX_DEEPLINK_LEN:
         raise RoutingError(
             f"профиль вырос до {len(deeplink)} байт — это уже рискованно для "
             f"HTTP-заголовка (лимит {_MAX_DEEPLINK_LEN}). Убери лишние домены."
         )
     _write(deeplink)
-    db.set_setting(_SETTING_KEY, json.dumps(domains))
+    db.set_setting(key, json.dumps(direct if key == _SETTING_KEY else proxy))
 
 
-def add(domains: list[str]) -> tuple[list[str], list[str]]:
-    """Возвращает (добавленные, пропущенные как уже имеющиеся)."""
-    current = custom_domains()
-    base = set(base_direct())
+def _add(domains: list[str], *, proxy: bool) -> tuple[list[str], list[str]]:
+    key = _PROXY_SETTING_KEY if proxy else _SETTING_KEY
+    current = list(custom_proxy_domains() if proxy else custom_domains())
+    base = set(base_proxy() if proxy else base_direct())
     added, skipped = [], []
     for d in domains:
         if d in current or d in base:
@@ -150,14 +180,39 @@ def add(domains: list[str]) -> tuple[list[str], list[str]]:
             current.append(d)
             added.append(d)
     if added:
-        _save(current)
+        if proxy:
+            _save(custom_domains(), current, key)
+        else:
+            _save(current, custom_proxy_domains(), key)
     return added, skipped
 
 
-def remove(domain: str) -> bool:
-    current = custom_domains()
+def _remove(domain: str, *, proxy: bool) -> bool:
+    key = _PROXY_SETTING_KEY if proxy else _SETTING_KEY
+    current = list(custom_proxy_domains() if proxy else custom_domains())
     if domain not in current:
         return False
     current.remove(domain)
-    _save(current)
+    if proxy:
+        _save(custom_domains(), current, key)
+    else:
+        _save(current, custom_proxy_domains(), key)
     return True
+
+
+def add(domains: list[str]) -> tuple[list[str], list[str]]:
+    """Возвращает (добавленные, пропущенные как уже имеющиеся)."""
+    return _add(domains, proxy=False)
+
+
+def add_proxy(domains: list[str]) -> tuple[list[str], list[str]]:
+    """То же для ProxySites — домены, которым явно нужен VPN."""
+    return _add(domains, proxy=True)
+
+
+def remove(domain: str) -> bool:
+    return _remove(domain, proxy=False)
+
+
+def remove_proxy(domain: str) -> bool:
+    return _remove(domain, proxy=True)

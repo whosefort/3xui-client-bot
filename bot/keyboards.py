@@ -377,6 +377,7 @@ def reality_menu_kb(ru_block_on: bool = False) -> InlineKeyboardMarkup:
     )
     kb.button(text="🌐 WARP", callback_data="rl:warp")
     kb.button(text="↪️ Direct-домены (в обход VPN)", callback_data="rl:direct")
+    kb.button(text="🔀 Proxy-домены (явно через VPN)", callback_data="rl:proxy")
     kb.button(text="✖️ Закрыть", callback_data="rl:close")
     kb.adjust(1)
     return kb.as_markup()
@@ -389,6 +390,18 @@ def direct_domains_kb(domains: list[str]) -> InlineKeyboardMarkup:
     for i, d in enumerate(domains):
         kb.button(text=f"🗑 {d}", callback_data=f"rl:directrm:{i}")
     kb.button(text="➕ Добавить домены", callback_data="rl:directadd")
+    kb.button(text="↩️ Назад", callback_data="rl:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def proxy_domains_kb(domains: list[str]) -> InlineKeyboardMarkup:
+    """Свои домены, которым явно нужен VPN (ProxySites). Базовый профиль не
+    правится, удаление по индексу — как у direct."""
+    kb = InlineKeyboardBuilder()
+    for i, d in enumerate(domains):
+        kb.button(text=f"🗑 {d}", callback_data=f"rl:proxyrm:{i}")
+    kb.button(text="➕ Добавить домены", callback_data="rl:proxyadd")
     kb.button(text="↩️ Назад", callback_data="rl:menu")
     kb.adjust(1)
     return kb.as_markup()

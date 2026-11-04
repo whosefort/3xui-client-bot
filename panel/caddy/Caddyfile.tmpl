@@ -33,6 +33,18 @@ http://__SUB_DOMAIN__ {
 
 __SUB_DOMAIN__ {
 	tls /etc/letsencrypt/live/__SUB_DOMAIN__/fullchain.pem /etc/letsencrypt/live/__SUB_DOMAIN__/privkey.pem
+	# Гео-файлы Happ (geoip.dat/geosite.dat) со своего домена: jsDelivr для
+	# части RU-клиентов недоступен или медленный, а Happ рвёт загрузку по
+	# таймауту. Файлы кладёт panel/caddy/fetch_geo.sh (пины версий — из
+	# panel/happ_routing.deeplink), бот подставляет эти URL в профиль при
+	# HAPP_GEO_BASE_URL=https://__SUB_DOMAIN__/geo в .env бота.
+	handle_path /geo/* {
+		root * /var/www/happ-geo
+		file_server
+		header Cache-Control "public, max-age=86400"
+		header Content-Type "application/octet-stream"
+		header -routing
+	}
 	# Happ ушёл на per-subscription роутинг — без этого заголовка каждый
 	# клиент настраивает bypass-правила руками в приложении. Заголовок
 	# routing с happ://routing/onadd/... даёт Happ готовый профиль.
