@@ -224,6 +224,22 @@ apt-get install -y fail2ban -qq >/dev/null 2>&1 && systemctl enable --now fail2b
   && ok "fail2ban включён." \
   || warn "fail2ban не встал — поставь руками (apt-get install fail2ban)."
 
+# ---------- 5.6. conntrack ----------
+# См. node/bootstrap.sh: на VPN-ноде дефолтная таблица 8192 + 5-дневный
+# timeout_established заполняются мёртвыми потоками, ядро дропает новые
+# соединения ("table full") — у клиентов это выглядит как просадка скорости.
+echo; ok "Настраиваю conntrack…"
+modprobe nf_conntrack 2>/dev/null || true
+cat > /etc/sysctl.d/99-vpn-conntrack.conf <<'EOF'
+net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_tcp_timeout_established = 7440
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 60
+net.netfilter.nf_conntrack_tcp_timeout_syn_sent = 30
+net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 30
+EOF
+sysctl --system >/dev/null 2>&1 || true
+ok "conntrack: max=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo '?')"
+
 echo
 echo -e "${G}ГОТОВО.${NC}"
 echo "Нода id=$NODE_ID должна стать 'connected' в панели за ~10-30 сек."

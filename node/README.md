@@ -56,6 +56,10 @@ PANEL_URL=https://mon.your-domain.tld bash bootstrap.sh
    него настоящий REALITY-хендшейк, удаляет юзера. Печатает явный вердикт:
    ТУННЕЛЬ ПРОВЕРЕН или НЕ ПРОШЁЛ. "connected" в панели — это здоровье
    node-API, не то же самое, что "клиент сможет подключиться".
+8. Настраивает **conntrack** (`/etc/sysctl.d/99-vpn-conntrack.conf`): дефолтные
+   8192 записи и 5-дневный `tcp_timeout_established` на VPN-ноде заполняются
+   мёртвыми потоками, ядро дропает новые соединения — у клиентов падает
+   скорость. Подробности и откат — `TROUBLESHOOTING.md`, раздел про conntrack.
 
 ## После
 - В панели нода станет `connected` за ~10–30 сек. Логи: `cd /opt/marzban-node && docker compose logs -f`.
@@ -64,6 +68,9 @@ PANEL_URL=https://mon.your-domain.tld bash bootstrap.sh
 - Клиент не подключается / "не пингуется", хотя нода `connected`? →
   [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) — сначала проверить версию
   xray-core, это самая частая причина.
+- Подключается, но скорость <1 Мбит/с? Сначала `bash node/check_conntrack.sh`
+  на ноде — переполненная таблица conntrack дропает новые соединения (см.
+  `TROUBLESHOOTING.md`, раздел про conntrack).
 
 ## Обслуживание
 - `MARZBAN_NODE_IMAGE` — зафиксированный образ `gozargah/marzban-node` (тег +

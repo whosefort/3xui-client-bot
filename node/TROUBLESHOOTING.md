@@ -171,3 +171,113 @@ rm -f /var/lib/marzban-node/client.json
 **Важно:** тестируй с чужой машины (check-host.net, другой VPS), не со своего
 домашнего провайдера — многие бытовые провайдеры SYN-ACK'ают весь диапазон
 портов на любой IP, что даёт ложное "порт открыт" при внешнем сканировании.
+
+---
+
+## Просадка скорости у всех клиентов: `nf_conntrack: table full`
+
+**Симптом.** Клиенты подключаются, но скорость падает до единиц Мбит/с и ниже
+(реальный случай 2026-11-04: было <1 Мбит/с, после фикса — ~20 Мбит/с). Часть
+новых соединений не открывается вообще, страницы и видео зависают, старые
+загрузки «умирают» на середине, спидтест может не стартовать. Провайдер и
+канал при этом ни при чём: сама нода отдаёт в интернет 200+ Мбит/с.
+
+**Причина.** Дефолтная таблица conntrack на ноде — **8192 записи**, а
+`nf_conntrack_tcp_timeout_established` — **5 дней** (432000 с). Клиенты на
+мобильных и спящих ноутбуках рвут соединения без FIN/RST; записи не
+освобождаются, таблица стоит полной. Когда она полна, ядро дропает пакеты
+**новых** соединений:
+
+```
+nf_conntrack: nf_conntrack: table full, dropping packet
+```
+
+Дополнительный маркер: UFW дропает `ctstate INVALID` — это пакеты потоков,
+у которых conntrack уже потерял запись. Для клиента это выглядит как
+оборванная на середине загрузка.
+
+### Диагностика (read-only)
+
+```bash
+sysctl net.netfilter.nf_conntrack_max net.netfilter.nf_conntrack_count \
+       net.netfilter.nf_conntrack_tcp_timeout_established
+# count == max и timeout_established == 432000 → это оно
+
+dmesg -T | grep -c "table full"
+dmesg -T | grep "table full" | tail -3
+
+ss -s
+# при полной таблице: сокетов ~700, а conntrack_count 8192 — записи «мёртвые»
+
+ss -tin dst <IP_КЛИЕНТА> | grep -E "cwnd|rto|retrans"
+# застрявший поток: cwnd:1, rto:120000 backoff:15, retrans:1/202, notsent:2.5M
+
+# скорость самой ноды (не должна быть низкой):
+curl -s -o /dev/null -w "%{speed_download} B/s\n" --max-time 40 \
+  https://ash-speed.hetzner.com/100MB.bin
+```
+
+Быстрая проверка одной командой: `bash node/check_conntrack.sh` (запускать на
+ноде; read-only).
+
+### Фикс
+
+```bash
+modprobe nf_conntrack 2>/dev/null || true
+cat > /etc/sysctl.d/99-vpn-conntrack.conf <<'EOF'
+net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_tcp_timeout_established = 7440
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 60
+net.netfilter.nf_conntrack_tcp_timeout_syn_sent = 30
+net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 30
+EOF
+sysctl --system
+```
+
+- `nf_conntrack_max` применяется на лету; таблица разгружается сразу.
+- `tcp_timeout_established = 7440` (2 часа) отпускает мёртвые потоки, не
+  трогая активные: запись обновляется на каждом пакете.
+- `nf_conntrack_buckets` не трогаем: меняется только при перезагрузке модуля,
+  а 8192 бакетов на 262144 записей — приемлемо (средняя цепочка ~32).
+
+### Проверка после фикса
+
+```bash
+sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max
+# count сильно ниже max (в реальном случае 392–757 из 262144)
+
+dmesg -T | grep "table full" | tail -1
+# новых сообщений после времени правки быть не должно
+
+for i in $(seq 1 60); do
+  curl -s -o /dev/null --max-time 5 -w "%{http_code}\n" https://1.1.1.1/ &
+done; wait
+# ожидаем 60/60 ok; до фикса часть новых соединений дропалась
+```
+
+### Откат
+
+При ручном применении на ноде создаётся `/root/conntrack-rollback.sh`:
+
+```bash
+/root/conntrack-rollback.sh   # вернёт 8192 / 432000 / 120 / 120 / 60 и удалит sysctl-файл
+```
+
+Откат применяется на лету, без перезагрузки. Но он возвращает и баг: таблица
+снова начнёт заполняться мёртвыми потоками.
+
+### Где это уже автоматизировано
+
+- `node/bootstrap.sh` — блок «4.6. conntrack» (ручная установка ноды).
+- `node/bootstrap_token.sh` — блок «5.6. conntrack» (авторазвёртывание из
+  админки бота). **Важно:** этот файл новые ноды качают с GitHub main, поэтому
+  фикс доедет до них только после коммита и пуша.
+- `xui/bootstrap.sh` — блок «3.5. conntrack» (второй сервер с 3x-ui).
+
+### Реальный кейс (2026-11-04)
+
+Нода `eu-frankfurt-01` (172.86.66.169, RouterHosting): `8192/8192`, 1409
+сообщений `table full` за день, 5,1% TCP-ретрансмиссий за 79 дней, у клиента
+с Ростелекома скорость <1 Мбит/с. После фикса: `392–757/262144`, новых
+`table full` нет, скорость клиента ~20 Мбит/с, память и CPU ноды без
+изменений.

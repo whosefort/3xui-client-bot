@@ -318,6 +318,24 @@ apt-get install -y fail2ban -qq >/dev/null 2>&1 && systemctl enable --now fail2b
   && ok "fail2ban включён." \
   || warn "fail2ban не встал — поставь руками (apt-get install fail2ban)."
 
+# ---------- 4.6. conntrack ----------
+# Дефолтные 8192 записи + 5-дневный tcp_timeout_established на VPN-ноде
+# заполняются «мёртвыми» потоками от мобильных/спящих клиентов: ядро пишет
+# "nf_conntrack: table full, dropping packet" и дропает новые соединения —
+# это выглядит как просадка скорости у всех клиентов. Таблицу расширяем,
+# мёртвые потоки отпускаем через 2 часа.
+echo; ok "Настраиваю conntrack…"
+modprobe nf_conntrack 2>/dev/null || true
+cat > /etc/sysctl.d/99-vpn-conntrack.conf <<'EOF'
+net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_tcp_timeout_established = 7440
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 60
+net.netfilter.nf_conntrack_tcp_timeout_syn_sent = 30
+net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 30
+EOF
+sysctl --system >/dev/null 2>&1 || true
+ok "conntrack: max=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo '?')"
+
 # ---------- 5. регистрация в панели ----------
 echo; ok "Регистрирую ноду в панели…"
 REG="$(curl -fsSL -X POST "$PANEL_URL/api/node" \

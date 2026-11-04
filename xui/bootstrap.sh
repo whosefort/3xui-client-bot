@@ -125,6 +125,22 @@ EOF
   sysctl --system >/dev/null 2>&1 || true
 fi
 
+# ============================ 3.5. conntrack ================================
+# VPN-нода с дефолтной таблицей 8192 и 5-дневным timeout_established
+# заполняется мёртвыми потоками, ядро дропает новые соединения
+# ("table full") — клиенты видят просадку скорости. См. node/bootstrap.sh.
+log "Настраиваю conntrack…"
+modprobe nf_conntrack 2>/dev/null || true
+cat > /etc/sysctl.d/99-vpn-conntrack.conf <<EOF
+net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_tcp_timeout_established = 7440
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 60
+net.netfilter.nf_conntrack_tcp_timeout_syn_sent = 30
+net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 30
+EOF
+sysctl --system >/dev/null 2>&1 || true
+log "conntrack: max=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo '?')."
+
 # ============================ 4. 3x-ui ======================================
 if [ "$INSTALL_3XUI" = true ]; then
   log "Ставлю 3x-ui (официальный установщик MHSanaei)…"
