@@ -60,7 +60,7 @@ async def _connect(address: str, *, user: str = "root", port: int = 22, connect_
 
 
 async def upgrade_node(address: str, xray_version: str, *, user: str = "root",
-                       port: int = 22, timeout: float = 180.0) -> str:
+                       port: int = 22, timeout: float = 540.0) -> str:
     """Копирует содержимое node/upgrade_xray.sh на ноду через stdin и
     гоняет с нужным пином версии. Возвращает хвост вывода для отчёта
     админу. Кидает SSHOpError с текстом причины при любом сбое."""

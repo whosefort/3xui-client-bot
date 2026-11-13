@@ -227,6 +227,22 @@ if [ -z "$NODE_IMAGE" ]; then
 fi
 
 echo; ok "Поднимаю marzban-node…"
+# Держим Xray в постоянном bind-mounted каталоге. При первом запуске
+# сначала извлекаем встроенное ядро из образа: если GitHub недоступен,
+# нода всё равно сможет стартовать и пережить пересоздание контейнера.
+XRAY_DIR=/var/lib/marzban-node/xray-bin
+mkdir -p "$XRAY_DIR"
+if [ ! -x "$XRAY_DIR/xray" ]; then
+  docker image inspect "$NODE_IMAGE" >/dev/null 2>&1 || docker pull "$NODE_IMAGE"
+  seed_container="$(docker create "$NODE_IMAGE")"
+  if ! docker cp "$seed_container:/usr/local/bin/xray" "$XRAY_DIR/.xray.seed"; then
+    docker rm -f "$seed_container" >/dev/null 2>&1 || true
+    die "Не удалось извлечь Xray из образа ноды"
+  fi
+  docker rm -f "$seed_container" >/dev/null
+  chmod 755 "$XRAY_DIR/.xray.seed"
+  mv -f "$XRAY_DIR/.xray.seed" "$XRAY_DIR/xray"
+fi
 mkdir -p /opt/marzban-node
 cat > /opt/marzban-node/docker-compose.yml <<EOF
 services:
@@ -239,6 +255,8 @@ services:
       XRAY_API_PORT: "${XRAY_API_PORT}"
       SERVICE_PROTOCOL: "rest"
       SSL_CLIENT_CERT_FILE: "/var/lib/marzban-node/ssl_client_cert.pem"
+      XRAY_EXECUTABLE_PATH: "/var/lib/marzban-node/xray-bin/xray"
+      PATH: "/var/lib/marzban-node/xray-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     volumes:
       - /var/lib/marzban-node:/var/lib/marzban-node
 EOF
@@ -269,28 +287,41 @@ fi
 if [ -n "$XRAY_TARGET_VER" ]; then
   XTMP="$(mktemp -d)"
   XZ_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_TARGET_VER}/Xray-linux-64.zip"
-  if curl -fsSL --max-time 90 -o "$XTMP/xray.zip" "$XZ_URL" 2>/dev/null; then
+  if curl -fsSL --connect-timeout 20 --max-time 300 -o "$XTMP/xray.zip" "$XZ_URL" 2>/dev/null; then
     _verify_xray_zip "$XTMP/xray.zip" "$XZ_URL"
     apt-get install -y unzip -qq >/dev/null 2>&1 || true
     unzip -o "$XTMP/xray.zip" -d "$XTMP/x" >/dev/null 2>&1
     if [ -x "$XTMP/x/xray" ]; then
-      docker cp "$XTMP/x/xray" marzban-node-marzban-node-1:/usr/local/bin/xray
-      docker restart marzban-node-marzban-node-1 >/dev/null
+      XRAY_EXPECTED="$("$XTMP/x/xray" version | head -1 || true)"
+      [ -n "$XRAY_EXPECTED" ] || die "Скачанный Xray не запускается."
+      cp -p "$XRAY_DIR/xray" "$XRAY_DIR/.xray.previous"
+      install -m 755 "$XTMP/x/xray" "$XRAY_DIR/.xray.new"
+      mv -f "$XRAY_DIR/.xray.new" "$XRAY_DIR/xray"
+      if ! docker restart marzban-node-marzban-node-1 >/dev/null; then
+        mv -f "$XRAY_DIR/.xray.previous" "$XRAY_DIR/xray"
+        docker restart marzban-node-marzban-node-1 >/dev/null || true
+        die "Не удалось перезапустить ноду, прежний Xray восстановлен."
+      fi
       sleep 4
       XRAY_INSTALLED="$(docker exec marzban-node-marzban-node-1 xray version 2>/dev/null | head -1 || true)"
+      if [ "$XRAY_INSTALLED" != "$XRAY_EXPECTED" ]; then
+        mv -f "$XRAY_DIR/.xray.previous" "$XRAY_DIR/xray"
+        docker restart marzban-node-marzban-node-1 >/dev/null || true
+        die "Версия Xray не подтвердилась, прежний бинарник восстановлен."
+      fi
+      rm -f "$XRAY_DIR/.xray.previous"
       ok "xray-core обновлён: ${XRAY_INSTALLED:-см. docker exec marzban-node-marzban-node-1 xray version}"
     else
-      warn "Архив xray-core скачался, но бинарник не нашёлся внутри — оставляю версию из образа."
+      warn "Архив xray-core скачался, но бинарник не нашёлся внутри — оставляю прежнюю сохранённую версию Xray."
     fi
   else
-    warn "Не смог скачать xray-core ${XRAY_TARGET_VER} — оставляю версию из образа marzban-node."
+    warn "Не смог скачать xray-core ${XRAY_TARGET_VER} — оставляю прежнюю сохранённую версию Xray."
   fi
   rm -rf -- "$XTMP"
 else
-  warn "Не смог определить актуальную версию xray-core (GitHub недоступен?) — оставляю версию из образа."
+  warn "Не смог определить актуальную версию xray-core (GitHub недоступен?) — оставляю прежнюю сохранённую версию Xray."
 fi
-warn "Замена бинарника живёт в writable layer контейнера — переживёт restart/reboot, но НЕ 'docker compose up --force-recreate'."
-warn "Для повторного апгрейда позже: node/upgrade_xray.sh на самой ноде."
+ok "Xray хранится в $XRAY_DIR и переживает пересоздание контейнера."
 
 # ---------- 4. firewall ----------
 echo; ok "Настраиваю UFW…"

@@ -70,25 +70,94 @@ echo "Сейчас в контейнере: ${CUR:-неизвестно}"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf -- "$TMPDIR"' EXIT
-URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
-echo "Качаю $URL …"
-curl -fsSL --max-time 90 -o "$TMPDIR/xray.zip" "$URL" || die "Скачать не удалось — версия $XRAY_VERSION существует? (проверь https://github.com/XTLS/Xray-core/releases)"
-_verify_xray_zip "$TMPDIR/xray.zip" "$URL"
-
-command -v unzip >/dev/null 2>&1 || apt-get install -y unzip -qq >/dev/null 2>&1
-unzip -o "$TMPDIR/xray.zip" -d "$TMPDIR/extracted" >/dev/null
+# Если версия уже установлена, используем тот же работающий бинарник для
+# миграции в том: повторно скачивать 16+ МБ по медленной сети не нужно.
+mkdir -p "$TMPDIR/extracted"
+case "$CUR" in
+  "Xray ${XRAY_VERSION#v} "*)
+    CURRENT_EXEC="$(docker exec "$CONTAINER" printenv XRAY_EXECUTABLE_PATH 2>/dev/null || true)"
+    docker cp "$CONTAINER:${CURRENT_EXEC:-/usr/local/bin/xray}" "$TMPDIR/extracted/xray"
+    ok "Версия уже установлена — сохраняю работающий бинарник."
+    ;;
+  *)
+    URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
+    echo "Качаю $URL …"
+    curl -fsSL --connect-timeout 20 --max-time 300 -o "$TMPDIR/xray.zip" "$URL" || die "Не удалось скачать Xray $XRAY_VERSION за 300 секунд."
+    _verify_xray_zip "$TMPDIR/xray.zip" "$URL"
+    command -v unzip >/dev/null 2>&1 || apt-get install -y unzip -qq >/dev/null 2>&1
+    unzip -o "$TMPDIR/xray.zip" -d "$TMPDIR/extracted" >/dev/null
+    ;;
+esac
 
 [ -x "$TMPDIR/extracted/xray" ] || die "В архиве нет исполняемого xray — сборка релиза изменилась?"
 NEWVER="$("$TMPDIR/extracted/xray" version | head -1 || true)"
 [ -n "$NEWVER" ] || die "Не смог прочитать версию из скачанного бинарника — архив побился?"
 ok "Скачано: $NEWVER"
 
-docker cp "$TMPDIR/extracted/xray" "$CONTAINER:/usr/local/bin/xray"
-docker restart "$CONTAINER" >/dev/null
-sleep 4
+# Миграция уже работающей ноды: сохраняем текущий Xray в существующем
+# постоянном томе и добавляем только собственный compose override. Базовый
+# compose-файл и чужие override-файлы не перезаписываем.
+NODE_DIR="${NODE_DIR:-/opt/marzban-node}"
+XRAY_DIR=/var/lib/marzban-node/xray-bin
+XRAY_PATH="$XRAY_DIR/xray"
+OVERRIDE="$NODE_DIR/docker-compose.override.yml"
+PERSISTENT=/var/lib/marzban-node/xray-bin/xray
+CURRENT_PATH="$(docker exec "$CONTAINER" printenv XRAY_EXECUTABLE_PATH 2>/dev/null || true)"
+MIGRATING=0
+if [ "$CURRENT_PATH" != "$PERSISTENT" ]; then
+  [ -f "$NODE_DIR/docker-compose.yml" ] || die "Не найден $NODE_DIR/docker-compose.yml; автоматическая миграция невозможна."
+  [ ! -e "$OVERRIDE" ] || die "Уже существует $OVERRIDE — не перезаписываю чужой конфиг. Настрой XRAY_EXECUTABLE_PATH вручную."
+  MOUNT_SOURCE="$(docker inspect "$CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/marzban-node"}}{{.Source}}{{end}}{{end}}')"
+  [ "$MOUNT_SOURCE" = /var/lib/marzban-node ] || die "Ожидаемый постоянный том /var/lib/marzban-node не найден."
+  SERVICE="$(docker inspect "$CONTAINER" --format '{{index .Config.Labels "com.docker.compose.service"}}')"
+  [ "$SERVICE" = marzban-node ] || die "Контейнер не относится к compose-сервису marzban-node."
+  MIGRATING=1
+fi
+mkdir -p "$XRAY_DIR"
+# Резервная копия нужна как при первом переносе, так и при откате неудачного
+# обновления. Получаем именно тот файл, который запускает текущий контейнер.
+CURRENT_PATH="${CURRENT_PATH:-/usr/local/bin/xray}"
+docker cp "$CONTAINER:$CURRENT_PATH" "$TMPDIR/previous-xray"
+install -m 755 "$TMPDIR/extracted/xray" "$XRAY_DIR/.xray.new"
+mv -f "$XRAY_DIR/.xray.new" "$XRAY_PATH"
 
-INVER="$(docker exec "$CONTAINER" xray version 2>/dev/null | head -1 || true)"
-[ "$INVER" = "$NEWVER" ] || die "После рестарта версия в контейнере не совпадает с установленной ($INVER). Смотри docker logs $CONTAINER."
+restore_previous() {
+  warn "Восстанавливаю прежний Xray после ошибки."
+  install -m 755 "$TMPDIR/previous-xray" "$XRAY_DIR/.xray.restore"
+  mv -f "$XRAY_DIR/.xray.restore" "$XRAY_PATH"
+  if [ "$MIGRATING" = 1 ]; then
+    rm -f "$OVERRIDE"
+    ( cd "$NODE_DIR" && docker compose up -d --no-deps marzban-node ) || warn "Не удалось автоматически восстановить контейнер."
+  else
+    docker restart "$CONTAINER" >/dev/null || warn "Не удалось перезапустить прежний Xray."
+  fi
+}
+if [ "$MIGRATING" = 1 ]; then
+  cat > "$OVERRIDE" <<'EOF'
+# Управляется node/upgrade_xray.sh. Xray хранится в постоянном томе ноды.
+services:
+  marzban-node:
+    environment:
+      XRAY_EXECUTABLE_PATH: /var/lib/marzban-node/xray-bin/xray
+      PATH: /var/lib/marzban-node/xray-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EOF
+  if ! ( cd "$NODE_DIR" && docker compose config -q && docker compose up -d --no-deps marzban-node ); then
+    restore_previous
+    die "Не удалось переключить контейнер на постоянный Xray."
+  fi
+else
+  if ! docker restart "$CONTAINER" >/dev/null; then
+    restore_previous
+    die "Не удалось перезапустить контейнер."
+  fi
+fi
+sleep 4
+INVER="$(docker exec "$CONTAINER" "$PERSISTENT" version 2>/dev/null | head -1 || true)"
+RUN_PATH="$(docker exec "$CONTAINER" printenv XRAY_EXECUTABLE_PATH 2>/dev/null || true)"
+if [ "$INVER" != "$NEWVER" ] || [ "$RUN_PATH" != "$PERSISTENT" ]; then
+  restore_previous
+  die "После перезапуска не подтверждены версия или постоянный путь Xray."
+fi
 ok "В контейнере теперь: $INVER"
 
 # После docker restart контейнеру нужно время поднять supervisor, законнектиться
@@ -110,6 +179,4 @@ else
 fi
 
 echo
-echo -e "${G}Готово.${NC} Не забудь: замена бинарника живёт в writable layer контейнера —"
-echo "переживёт restart/reboot, но НЕ переживёт 'docker compose up --force-recreate' или пересборку образа."
-echo "Перезапускай upgrade_xray.sh после любого пересоздания контейнера ноды."
+echo -e "${G}Готово.${NC} Xray хранится в $XRAY_PATH и переживает пересоздание контейнера."

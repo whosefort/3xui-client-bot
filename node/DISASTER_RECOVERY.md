@@ -130,6 +130,7 @@ PANEL_URL=... PANEL_USER=... PANEL_PASS=... NODE_IP=<новый_IP> NODE_SSH_PAS
   bash node/verify_node.sh
 ```
 
-Готово. Не забудь: `node/upgrade_xray.sh` — не разовая вещь, гоняй его снова
-после любого `docker compose up --force-recreate`/пересоздания контейнера
-ноды (live-патч бинарника живёт в writable layer, не в образе).
+Готово. После нового bootstrap или первого запуска `node/upgrade_xray.sh`
+Xray хранится в постоянном томе `/var/lib/marzban-node/xray-bin/xray` и
+переживает пересоздание контейнера. При восстановлении нужно также сохранить
+этот каталог вместе с остальными данными ноды.
