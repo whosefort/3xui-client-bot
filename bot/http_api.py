@@ -53,7 +53,7 @@ def _read_node_image() -> str:
 async def _fetch_latest_stable_xray_version() -> str:
     """GitHub /releases/latest сам отфильтровывает pre-release — в отличие
     от node/XRAY_VERSION, который может быть pin'ут на pre-release тег (см.
-    bot/handlers/admin.py — та же логика для флот-апгрейда). Пусто при любой
+    bot/handlers/admin/servers.py — та же логика для флот-апгрейда). Пусто при любой
     ошибке: bootstrap_token.sh тогда падает на свой штатный GitHub-latest
     фолбэк (уже включая pre-release) — не идеально, но не блокирует бутстрап."""
     try:

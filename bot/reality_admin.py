@@ -22,11 +22,11 @@ from cryptography.hazmat.primitives.serialization import (Encoding, NoEncryption
                                                             PrivateFormat, PublicFormat)
 
 from .config import config
-from .node_provision import _UA, _marzban_auth, config_lock
+from .node_provision import config_lock, get_core_config, marzban_headers, put_core_config
 
 _DEFAULT_PORT = 443
 
-# Затравка для пикера SNI по конкретной ноде (bot/handlers/admin.py) — не
+# Затравка для пикера SNI по конкретной ноде (bot/handlers/admin/servers.py) — не
 # гарантия, что подойдёт: check_sni_candidate() всё равно гоняет честный
 # TLS1.3-хендшейк при выборе. Просто чтобы не печатать домен руками каждый
 # раз — известные, давно живущие сайты с честным TLS1.3 и настоящим CA.
@@ -92,16 +92,14 @@ def _find_ru_block_rule(cfg: dict) -> dict | None:
 
 async def get_ru_block_enabled() -> bool:
     async with aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
     return _find_ru_block_rule(cfg) is not None
 
 
 async def set_ru_block(enabled: bool) -> None:
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
         rules = cfg.setdefault("routing", {}).setdefault("rules", [])
         existing = _find_ru_block_rule(cfg)
@@ -127,24 +125,16 @@ def _find_inbound(cfg: dict) -> dict:
 
 
 async def _get_config(s: aiohttp.ClientSession, headers: dict) -> dict:
-    async with s.get(f"{config.marzban_url}/api/core/config", headers=headers) as r:
-        data = await r.json(content_type=None)
-        if r.status >= 400:
-            raise RealityError(f"не смог получить core config ({r.status}): {data}")
-        return data
+    return await get_core_config(s, headers, RealityError)
 
 
 async def _put_config(s: aiohttp.ClientSession, headers: dict, cfg: dict) -> None:
-    async with s.put(f"{config.marzban_url}/api/core/config", json=cfg, headers=headers) as r:
-        res = await r.json(content_type=None)
-        if r.status >= 400:
-            raise RealityError(f"не смог сохранить core config ({r.status}): {res}")
+    await put_core_config(s, headers, cfg, RealityError)
 
 
 async def get_settings() -> dict:
     async with aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
     inbound = _find_inbound(cfg)
     rs = inbound["streamSettings"]["realitySettings"]
@@ -164,8 +154,7 @@ async def set_sni(domain: str, port: int = _DEFAULT_PORT) -> None:
     хосты с явно выставленным старым sni (см. Hosts API) продолжат отдавать
     клиентам старое значение в обход нового дефолта инбаунда."""
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
 
         cfg = await _get_config(s, headers)
         inbound = _find_inbound(cfg)
@@ -231,35 +220,43 @@ FRAGMENT_DEFAULT = "10-100,100-200,tlshello"
 NOISE_DEFAULT = "rand:10-20,100-200"
 
 
+async def _get_hosts(session: aiohttp.ClientSession, headers: dict) -> dict:
+    async with session.get(f"{config.marzban_url}/api/hosts", headers=headers) as response:
+        hosts = await response.json(content_type=None)
+        if response.status >= 400:
+            raise RealityError(f"не смог получить хосты ({response.status}): {hosts}")
+        return hosts
+
+
+async def _put_hosts(
+    session: aiohttp.ClientSession, headers: dict, hosts: dict, setting: str,
+) -> None:
+    async with session.put(
+        f"{config.marzban_url}/api/hosts", json=hosts, headers=headers,
+    ) as response:
+        result = await response.json(content_type=None)
+        if response.status >= 400:
+            raise RealityError(f"не смог сохранить {setting} ({response.status}): {result}")
+
+
 async def set_host_fragment(tag: str, index: int, enabled: bool) -> None:
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
-        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
-            hosts = await r.json(content_type=None)
-            if r.status >= 400:
-                raise RealityError(f"не смог получить хосты ({r.status}): {hosts}")
+        headers = await marzban_headers(s)
+        hosts = await _get_hosts(s, headers)
         entries = hosts.get(tag)
         if not entries or index >= len(entries):
             raise RealityError(f"хост {tag}[{index}] не найден — список хостов изменился")
         entries[index]["fragment_setting"] = FRAGMENT_DEFAULT if enabled else None
         entries[index]["noise_setting"] = NOISE_DEFAULT if enabled else None
-        async with s.put(f"{config.marzban_url}/api/hosts", json=hosts, headers=headers) as r:
-            res = await r.json(content_type=None)
-            if r.status >= 400:
-                raise RealityError(f"не смог сохранить fragment ({r.status}): {res}")
+        await _put_hosts(s, headers, hosts, "fragment")
 
 
 async def set_fragment_all(enabled: bool) -> int:
     """Fragment/noise разом на ВСЕ хосты во всех инбаундах — тот же паттерн,
     что set_fingerprint_all. Возвращает число изменённых записей."""
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
-        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
-            hosts = await r.json(content_type=None)
-            if r.status >= 400:
-                raise RealityError(f"не смог получить хосты ({r.status}): {hosts}")
+        headers = await marzban_headers(s)
+        hosts = await _get_hosts(s, headers)
         changed = 0
         for entries in hosts.values():
             for h in entries:
@@ -269,10 +266,7 @@ async def set_fragment_all(enabled: bool) -> int:
                     h["noise_setting"] = NOISE_DEFAULT if enabled else None
                     changed += 1
         if changed:
-            async with s.put(f"{config.marzban_url}/api/hosts", json=hosts, headers=headers) as r:
-                res = await r.json(content_type=None)
-                if r.status >= 400:
-                    raise RealityError(f"не смог сохранить fragment ({r.status}): {res}")
+            await _put_hosts(s, headers, hosts, "fragment")
     return changed
 
 
@@ -289,20 +283,13 @@ async def set_host_fingerprint(tag: str, index: int, fp: str) -> None:
     if fp not in FINGERPRINT_OPTIONS:
         raise RealityError(f"неизвестный fingerprint: {fp}")
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
-        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
-            hosts = await r.json(content_type=None)
-            if r.status >= 400:
-                raise RealityError(f"не смог получить хосты ({r.status}): {hosts}")
+        headers = await marzban_headers(s)
+        hosts = await _get_hosts(s, headers)
         entries = hosts.get(tag)
         if not entries or index >= len(entries):
             raise RealityError(f"хост {tag}[{index}] не найден — список хостов изменился")
         entries[index]["fingerprint"] = fp
-        async with s.put(f"{config.marzban_url}/api/hosts", json=hosts, headers=headers) as r:
-            res = await r.json(content_type=None)
-            if r.status >= 400:
-                raise RealityError(f"не смог сохранить fingerprint ({r.status}): {res}")
+        await _put_hosts(s, headers, hosts, "fingerprint")
 
 
 async def set_fingerprint_all(fp: str) -> int:
@@ -311,12 +298,8 @@ async def set_fingerprint_all(fp: str) -> int:
     if fp not in FINGERPRINT_OPTIONS:
         raise RealityError(f"неизвестный fingerprint: {fp}")
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
-        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
-            hosts = await r.json(content_type=None)
-            if r.status >= 400:
-                raise RealityError(f"не смог получить хосты ({r.status}): {hosts}")
+        headers = await marzban_headers(s)
+        hosts = await _get_hosts(s, headers)
         changed = 0
         for entries in hosts.values():
             for h in entries:
@@ -324,10 +307,7 @@ async def set_fingerprint_all(fp: str) -> int:
                     h["fingerprint"] = fp
                     changed += 1
         if changed:
-            async with s.put(f"{config.marzban_url}/api/hosts", json=hosts, headers=headers) as r:
-                res = await r.json(content_type=None)
-                if r.status >= 400:
-                    raise RealityError(f"не смог сохранить fingerprint ({r.status}): {res}")
+            await _put_hosts(s, headers, hosts, "fingerprint")
     return changed
 
 
@@ -341,8 +321,7 @@ async def set_host_sni(tag: str, index: int, domain: str | None) -> None:
     Если domain не входит в текущий serverNames — молча добавляет его туда
     (не заменяет остальные, только дописывает)."""
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
 
         if domain:
             cfg = await _get_config(s, headers)
@@ -351,18 +330,12 @@ async def set_host_sni(tag: str, index: int, domain: str | None) -> None:
                 rs.setdefault("serverNames", []).append(domain)
                 await _put_config(s, headers, cfg)
 
-        async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
-            hosts = await r.json(content_type=None)
-            if r.status >= 400:
-                raise RealityError(f"не смог получить хосты ({r.status}): {hosts}")
+        hosts = await _get_hosts(s, headers)
         entries = hosts.get(tag)
         if not entries or index >= len(entries):
             raise RealityError(f"хост {tag}[{index}] не найден — список хостов изменился")
         entries[index]["sni"] = domain
-        async with s.put(f"{config.marzban_url}/api/hosts", json=hosts, headers=headers) as r:
-            res = await r.json(content_type=None)
-            if r.status >= 400:
-                raise RealityError(f"не смог сохранить sni хоста ({r.status}): {res}")
+        await _put_hosts(s, headers, hosts, "sni хоста")
 
 
 async def regenerate_keys() -> str:
@@ -375,8 +348,7 @@ async def regenerate_keys() -> str:
     pub_b64 = urlsafe_b64encode(pub_raw).rstrip(b"=").decode()
 
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
         rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
         rs["privateKey"] = priv_b64
@@ -388,8 +360,7 @@ async def regenerate_keys() -> str:
 async def regenerate_short_ids(count: int = 8) -> list[str]:
     ids = [secrets.token_hex(4) for _ in range(count)]  # 8 hex-символов каждый
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
         rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
         rs["shortIds"] = ids
@@ -402,8 +373,7 @@ async def add_short_id() -> str:
     работает сразу, старые продолжают работать, пока их явно не убрали."""
     new_id = secrets.token_hex(4)
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
         rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
         rs.setdefault("shortIds", []).append(new_id)
@@ -418,8 +388,7 @@ async def add_short_id() -> str:
 
 async def remove_short_id(short_id: str) -> None:
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
         rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
         ids = rs.get("shortIds", [])
@@ -445,8 +414,7 @@ async def set_port(port: int) -> None:
     if not (1 <= port <= 65535):
         raise RealityError(f"порт {port} вне диапазона 1-65535")
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
         inbound = _find_inbound(cfg)
         inbound["port"] = port
@@ -462,8 +430,7 @@ async def set_spx(value: str) -> None:
     правдоподобия REALITY, см. app/xray/config.py в Marzban). Пустая строка
     сбрасывает на дефолт (панель сама подставит '')."""
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
         rs = _find_inbound(cfg)["streamSettings"]["realitySettings"]
         if value:
