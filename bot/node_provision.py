@@ -47,6 +47,30 @@ async def _marzban_auth(session: aiohttp.ClientSession) -> str:
     return tok
 
 
+async def marzban_headers(session: aiohttp.ClientSession) -> dict[str, str]:
+    token = await _marzban_auth(session)
+    return {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+
+
+async def get_core_config(
+    session: aiohttp.ClientSession, headers: dict, error_type: type[Exception],
+) -> dict:
+    async with session.get(f"{config.marzban_url}/api/core/config", headers=headers) as response:
+        data = await response.json(content_type=None)
+        if response.status >= 400:
+            raise error_type(f"не смог получить core config ({response.status}): {data}")
+        return data
+
+
+async def put_core_config(
+    session: aiohttp.ClientSession, headers: dict, cfg: dict, error_type: type[Exception],
+) -> None:
+    async with session.put(f"{config.marzban_url}/api/core/config", json=cfg, headers=headers) as response:
+        result = await response.json(content_type=None)
+        if response.status >= 400:
+            raise error_type(f"не смог сохранить core config ({response.status}): {result}")
+
+
 async def _detect_panel_ip() -> str:
     """IP, с которого панель стучится к ноде (для UFW-скоупа 62050/62051 на
     ноде). Бот сейчас всегда живёт на той же машине, что и панель — поэтому
@@ -62,8 +86,7 @@ async def register_node(name: str, address: str) -> dict:
     """Регистрирует ноду в Marzban, тянет её client-cert. Возвращает
     {node_id, cert_pem, panel_ip, service_port, xray_api_port}."""
     async with aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
 
         async with s.post(
             f"{config.marzban_url}/api/node",
@@ -107,8 +130,7 @@ async def list_nodes() -> list[dict]:
     """Реальные ноды из /api/nodes (не хосты-в-подписке — здесь address —
     настоящий IP ноды, куда бот будет ходить по SSH)."""
     async with aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         async with s.get(f"{config.marzban_url}/api/nodes", headers=headers) as r:
             data = await r.json(content_type=None)
             if r.status >= 400:
@@ -124,8 +146,7 @@ async def list_servers() -> list[dict]:
     чтобы однозначно адресовать запись в bulk-PUT /api/hosts (Marzban не даёт
     отдельного id хосту)."""
     async with aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
             data = await r.json(content_type=None)
             if r.status >= 400:
@@ -149,8 +170,7 @@ async def rename_server(tag: str, index: int, remark: str) -> None:
     """Меняет remark одного хоста — bulk-эндпоинт, поэтому тянем всю
     структуру /api/hosts, правим один элемент и кладём обратно целиком."""
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         async with s.get(f"{config.marzban_url}/api/hosts", headers=headers) as r:
             data = await r.json(content_type=None)
             if r.status >= 400:
@@ -177,8 +197,7 @@ async def create_verify_client() -> dict | None:
     from urllib.parse import parse_qsl, urlparse
 
     async with aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
 
         async with s.get(f"{config.marzban_url}/api/core/config", headers=headers) as r:
             cfg = await r.json(content_type=None)
@@ -234,8 +253,7 @@ async def create_verify_client() -> dict | None:
 
 async def delete_verify_client(username: str) -> None:
     async with aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         async with s.delete(f"{config.marzban_url}/api/user/{username}", headers=headers) as r:
             if r.status >= 400:
                 body = await r.text()

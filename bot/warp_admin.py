@@ -15,8 +15,7 @@ import re
 
 import aiohttp
 
-from .config import config
-from .node_provision import _UA, _marzban_auth, config_lock
+from .node_provision import config_lock, get_core_config, marzban_headers, put_core_config
 
 _DOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$")
 
@@ -66,18 +65,11 @@ def valid_domain(domain: str) -> bool:
 
 
 async def _get_config(s: aiohttp.ClientSession, headers: dict) -> dict:
-    async with s.get(f"{config.marzban_url}/api/core/config", headers=headers) as r:
-        data = await r.json(content_type=None)
-        if r.status >= 400:
-            raise WarpAdminError(f"не смог получить core config ({r.status}): {data}")
-        return data
+    return await get_core_config(s, headers, WarpAdminError)
 
 
 async def _put_config(s: aiohttp.ClientSession, headers: dict, cfg: dict) -> None:
-    async with s.put(f"{config.marzban_url}/api/core/config", json=cfg, headers=headers) as r:
-        res = await r.json(content_type=None)
-        if r.status >= 400:
-            raise WarpAdminError(f"не смог сохранить core config ({r.status}): {res}")
+    await put_core_config(s, headers, cfg, WarpAdminError)
 
 
 def _find_outbound(cfg: dict, tag: str) -> dict | None:
@@ -98,8 +90,7 @@ async def list_warp_outbounds() -> list[dict]:
     """[{tag, address}, ...] — все wireguard-outbound'ы в конфиге, не только
     WARP теоретически, но у нас в кластере другого источника wireguard нет."""
     async with aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
     out = []
     for o in cfg.get("outbounds", []):
@@ -116,8 +107,7 @@ async def add_warp_outbound(tag: str, data: dict) -> None:
     и на многих VPS падает молча) и domainStrategy=ForceIPv4v6 (иначе на
     хосте с половинчатым IPv6 хендшейк молча уходит в чёрную дыру по AAAA)."""
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
 
         if _find_outbound(cfg, tag):
@@ -147,8 +137,7 @@ async def remove_warp_outbound(tag: str) -> None:
     """Убирает и сам outbound, и его routing-правило (если есть) — иначе
     останется правило, слепо указывающее на несуществующий outbound."""
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
 
         out = _find_outbound(cfg, tag)
@@ -169,8 +158,7 @@ async def remove_warp_outbound(tag: str) -> None:
 
 async def list_warp_routes(tag: str) -> list[str]:
     async with aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
     rule = _find_route_rule(cfg, tag)
     return list(rule.get("domain", [])) if rule else []
@@ -181,8 +169,7 @@ async def add_warp_route(tag: str, domain: str) -> None:
     выбранный WARP-домен должен побеждать более широкие категорийные
     правила (например rl:rublocktoggle), а не наоборот."""
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
 
         if not _find_outbound(cfg, tag):
@@ -212,8 +199,7 @@ async def add_warp_route_bulk(tag: str, domains: list[str]) -> int:
     round-trip'ов до панели без всякой пользы. Возвращает число реально
     добавленных (уже присутствовавшие пропускаются)."""
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
 
         if not _find_outbound(cfg, tag):
@@ -240,8 +226,7 @@ async def add_warp_route_bulk(tag: str, domains: list[str]) -> int:
 
 async def remove_warp_route(tag: str, domain: str) -> None:
     async with config_lock, aiohttp.ClientSession() as s:
-        token = await _marzban_auth(s)
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": _UA}
+        headers = await marzban_headers(s)
         cfg = await _get_config(s, headers)
 
         rule = _find_route_rule(cfg, tag)

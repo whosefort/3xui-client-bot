@@ -383,28 +383,23 @@ def reality_menu_kb(ru_block_on: bool = False) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def direct_domains_kb(domains: list[str]) -> InlineKeyboardMarkup:
-    """Только СВОИ домены (добавленные из бота) — базовый профиль отсюда не
-    правится. Удаление по индексу: домен в callback_data мог бы не влезть в 64 байта."""
+def _happ_domains_kb(domains: list[str], route: str) -> InlineKeyboardMarkup:
+    """Use indexes so domain names do not exceed Telegram's callback limit."""
     kb = InlineKeyboardBuilder()
-    for i, d in enumerate(domains):
-        kb.button(text=f"🗑 {d}", callback_data=f"rl:directrm:{i}")
-    kb.button(text="➕ Добавить домены", callback_data="rl:directadd")
+    for i, domain in enumerate(domains):
+        kb.button(text=f"🗑 {domain}", callback_data=f"rl:{route}rm:{i}")
+    kb.button(text="➕ Добавить домены", callback_data=f"rl:{route}add")
     kb.button(text="↩️ Назад", callback_data="rl:menu")
     kb.adjust(1)
     return kb.as_markup()
+
+
+def direct_domains_kb(domains: list[str]) -> InlineKeyboardMarkup:
+    return _happ_domains_kb(domains, "direct")
 
 
 def proxy_domains_kb(domains: list[str]) -> InlineKeyboardMarkup:
-    """Свои домены, которым явно нужен VPN (ProxySites). Базовый профиль не
-    правится, удаление по индексу — как у direct."""
-    kb = InlineKeyboardBuilder()
-    for i, d in enumerate(domains):
-        kb.button(text=f"🗑 {d}", callback_data=f"rl:proxyrm:{i}")
-    kb.button(text="➕ Добавить домены", callback_data="rl:proxyadd")
-    kb.button(text="↩️ Назад", callback_data="rl:menu")
-    kb.adjust(1)
-    return kb.as_markup()
+    return _happ_domains_kb(domains, "proxy")
 
 
 def warp_nodes_kb(nodes: list[tuple[str, str, bool]]) -> InlineKeyboardMarkup:
