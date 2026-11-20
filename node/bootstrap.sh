@@ -81,11 +81,16 @@ if [ -n "${BOT_SSH_PUBKEY:-}" ]; then
   ok "SSH-ключ бота добавлен в authorized_keys."
 fi
 PANEL_URL="${PANEL_URL%/}"
+PANEL_CURL=(curl -fsS)
+if [ "${REQUIRE_TUNNEL_VERIFY:-0}" != "1" ]; then PANEL_CURL+=(-L); fi
 
 # ---------- публичный IP ----------
 PUBIP="$(curl -fsSL https://api.ipify.org 2>/dev/null || true)"
 [ -n "$PUBIP" ] || PUBIP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
 [ -n "$PUBIP" ] || die "Не смог определить публичный IP — задай вручную (переменная PUBIP)."
+if [ -n "${EXPECTED_NODE_IP:-}" ] && [ "$PUBIP" != "$EXPECTED_NODE_IP" ]; then
+  die "Публичный IP $PUBIP отличается от ожидаемого $EXPECTED_NODE_IP."
+fi
 ok "Публичный IP ноды: $PUBIP"
 
 # ВАЖНО: если панель спрятана за CDN (Cloudflare/…), DNS вернёт anycast-IP CDN,
@@ -185,12 +190,12 @@ echo; ok "Логинюсь в панель, тяну client-cert…"
   printf 'data-urlencode = "%s"\n' "$(_curl_config_escape "username=$PANEL_USER")"
   printf 'data-urlencode = "%s"\n' "$(_curl_config_escape "password=$PANEL_PASS")"
 } > "$CURL_AUTH_CONFIG"
-TOKEN="$(curl -fsSL -X POST "$PANEL_URL/api/admin/token" --config "$CURL_AUTH_CONFIG" | jget access_token)"
+TOKEN="$("${PANEL_CURL[@]}" -X POST "$PANEL_URL/api/admin/token" --config "$CURL_AUTH_CONFIG" | jget access_token)"
 [ -n "$TOKEN" ] || die "Логин в панель не удался (проверь URL/логин/пароль)."
 
 mkdir -p /var/lib/marzban-node
 _write_curl_auth
-curl -fsSL "$PANEL_URL/api/node/settings" --config "$CURL_AUTH_CONFIG" \
+"${PANEL_CURL[@]}" "$PANEL_URL/api/node/settings" --config "$CURL_AUTH_CONFIG" \
   | jget certificate > /var/lib/marzban-node/ssl_client_cert.pem
 chmod 600 /var/lib/marzban-node/ssl_client_cert.pem
 [ -s /var/lib/marzban-node/ssl_client_cert.pem ] || die "Пустой cert от панели."
@@ -273,6 +278,7 @@ ok "marzban-node запущен."
 # Ставим последний тег XTLS/Xray-core (включая pre-release) поверх того, что в
 # образе. См. node/TROUBLESHOOTING.md.
 echo; ok "Обновляю xray-core до актуальной версии (совместимость с клиентами)…"
+XRAY_INSTALLED=""
 XRAY_TARGET_VER="${XRAY_VERSION:-}"
 XRAY_PIN_FILE="$(dirname "${BASH_SOURCE[0]:-$0}")/XRAY_VERSION"
 if [ -z "$XRAY_TARGET_VER" ] && [ -f "$XRAY_PIN_FILE" ]; then
@@ -322,6 +328,9 @@ else
   warn "Не смог определить актуальную версию xray-core (GitHub недоступен?) — оставляю прежнюю сохранённую версию Xray."
 fi
 ok "Xray хранится в $XRAY_DIR и переживает пересоздание контейнера."
+if [ "${REQUIRE_TUNNEL_VERIFY:-0}" = "1" ] && [[ "$XRAY_INSTALLED" != "Xray ${XRAY_TARGET_VER#v} "* ]]; then
+  die "Запрошенная версия Xray не установлена."
+fi
 
 # ---------- 4. firewall ----------
 echo; ok "Настраиваю UFW…"
@@ -369,13 +378,14 @@ ok "conntrack: max=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null ||
 
 # ---------- 5. регистрация в панели ----------
 echo; ok "Регистрирую ноду в панели…"
-REG="$(curl -fsSL -X POST "$PANEL_URL/api/node" \
+REG="$("${PANEL_CURL[@]}" -X POST "$PANEL_URL/api/node" \
         --config "$CURL_AUTH_CONFIG" -H "Content-Type: application/json" \
         -d "{\"name\":\"${NODE_NAME}\",\"address\":\"${PUBIP}\",\"port\":${SERVICE_PORT},\"api_port\":${XRAY_API_PORT},\"add_as_new_host\":true}" || true)"
 NODE_ID="$(echo "$REG" | jget id)"
 if [ -n "$NODE_ID" ]; then
   ok "Нода зарегистрирована: id=$NODE_ID name=$NODE_NAME address=$PUBIP"
 else
+  [ "${REQUIRE_TUNNEL_VERIFY:-0}" != "1" ] || die "Не удалось зарегистрировать выделенную ноду."
   warn "Авто-регистрация не удалась (возможно, нода с таким адресом уже есть). Ответ: ${REG:0:200}"
   warn "Зарегистрируй руками в панели: Node Settings → Add Node → address=$PUBIP, port=$SERVICE_PORT, api_port=$XRAY_API_PORT."
 fi
@@ -389,20 +399,41 @@ fi
 echo; ok "Проверяю туннель по-настоящему (не просто 'connected')…"
 _write_curl_auth
 VERIFY_JSON="$(mktemp)"
-python3 - "$PANEL_URL" "$TOKEN" > "$VERIFY_JSON" <<'PY'
+VUSER=""
+VCFG=""
+VPID=""
+_cleanup_verify() {
+  if [ -n "$VPID" ]; then kill "$VPID" 2>/dev/null || true; fi
+  if [ -n "$VCFG" ]; then rm -f -- "$VCFG" /var/lib/marzban-node/verify_client.json; fi
+  if [ -n "$VUSER" ]; then
+    "${PANEL_CURL[@]}" -X DELETE "$PANEL_URL/api/user/$VUSER" --config "$CURL_AUTH_CONFIG" \
+      >/dev/null 2>&1 || warn "Не удалось удалить временного клиента $VUSER."
+  fi
+  rm -f -- "$VERIFY_JSON" "$CURL_AUTH_CONFIG"
+}
+trap _cleanup_verify EXIT
+python3 - "$PANEL_URL" "$PUBIP" "$CURL_AUTH_CONFIG" "${REQUIRE_TUNNEL_VERIFY:-0}" > "$VERIFY_JSON" <<'PY'
 import sys, urllib.request, json, secrets, uuid
 from urllib.parse import urlparse, parse_qsl
-base, token = sys.argv[1], sys.argv[2]
+base, node_ip, auth_config, strict = sys.argv[1:]
+with open(auth_config) as f:
+    authorization = json.loads(f.read().partition(" = ")[2]).split(": ", 1)[1]
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+opener = urllib.request.build_opener(NoRedirect()) if strict == "1" else urllib.request.build_opener()
 ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 def api(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method)
-    req.add_header("User-Agent", ua); req.add_header("Authorization", "Bearer " + token)
+    req.add_header("User-Agent", ua); req.add_header("Authorization", authorization)
     if data is not None: req.add_header("Content-Type", "application/json")
-    r = urllib.request.urlopen(req, timeout=30); raw = r.read()
+    with opener.open(req, timeout=30) as response:
+        raw = response.read()
     return json.loads(raw) if raw else {}
 cfg = api("GET", "/api/core/config")
-tags = [i["tag"] for i in cfg.get("inbounds", []) if i.get("streamSettings", {}).get("security") == "reality"]
+tags = [i["tag"] for i in cfg.get("inbounds", []) if i.get("protocol") == "vless"
+        and i.get("streamSettings", {}).get("security") == "reality"]
 if not tags:
     print(json.dumps({"skip": "no reality inbound configured yet"})); raise SystemExit(0)
 tag = tags[0]
@@ -411,10 +442,31 @@ client_id = str(uuid.uuid4())
 api("POST", "/api/user", {"username": username, "status": "active",
     "proxies": {"vless": {"id": client_id, "flow": "xtls-rprx-vision"}},
     "inbounds": {"vless": [tag]}})
-u = api("GET", f"/api/user/{username}")
-p = urlparse(u["links"][0]); q = dict(parse_qsl(p.query))
-print(json.dumps({"username": username, "uuid": p.username, "pbk": q.get("pbk"),
-    "sid": q.get("sid"), "sni": q.get("sni"), "fp": q.get("fp", "chrome")}))
+try:
+    u = api("GET", f"/api/user/{username}")
+    fallback = None
+    for link in u.get("links", []):
+        p = urlparse(link)
+        q = dict(parse_qsl(p.query, keep_blank_values=True))
+        if (p.scheme == "vless" and p.username == client_id and q.get("security") == "reality"
+                and q.get("flow") == "xtls-rprx-vision"
+                and q.get("pbk") and q.get("sni") and "sid" in q):
+            if p.hostname == node_ip and p.port == 443:
+                fallback = q
+                break
+            if strict != "1" and fallback is None:
+                fallback = q
+    if fallback is None:
+        raise RuntimeError("Панель не выдала REALITY-ссылку для этой ноды на 443.")
+    q = fallback
+    fp = q.get("fp")
+    if fp not in ("chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq"):
+        fp = "chrome"
+    print(json.dumps({"username": username, "uuid": client_id, "pbk": q["pbk"],
+        "sid": q["sid"], "sni": q["sni"], "fp": fp}))
+except Exception:
+    api("DELETE", f"/api/user/{username}")
+    raise
 PY
 
 SKIP="$(python3 -c "import json;print(json.load(open('$VERIFY_JSON')).get('skip',''))")"
@@ -423,6 +475,9 @@ if [ -n "$SKIP" ]; then
   warn "Опиши REALITY-инбаунд в панели (Core Config), потом прогони node/verify_node.sh."
 else
   VUSER="$(python3 -c "import json;print(json.load(open('$VERIFY_JSON'))['username'])")"
+  if [ -n "$(ss -H -ltn 'sport = :19999')" ]; then
+    die "Порт локальной проверки 19999 занят."
+  fi
   VCFG="$(mktemp)"
   python3 - "$VERIFY_JSON" "$PUBIP" > "$VCFG" <<'PY'
 import json, sys
@@ -440,12 +495,9 @@ PY
   cp "$VCFG" /var/lib/marzban-node/verify_client.json
   ( cd /opt/marzban-node && docker compose exec -d marzban-node xray run -config /var/lib/marzban-node/verify_client.json )
   sleep 3
+  [ "${REQUIRE_TUNNEL_VERIFY:-0}" != "1" ] || sleep 8
   VRESULT="$(curl --socks5-hostname 127.0.0.1:19999 -s -o /dev/null -w '%{http_code}' --max-time 10 https://www.gstatic.com/generate_204 || true)"
-  VPID="$(ss -tlnp 2>/dev/null | grep '127.0.0.1:19999' | grep -oE 'pid=[0-9]+' | cut -d= -f2)"
-  [ -n "$VPID" ] && kill "$VPID" 2>/dev/null || true
-  rm -f /var/lib/marzban-node/verify_client.json "$VCFG"
-  _write_curl_auth
-  curl -fsSL -X DELETE "$PANEL_URL/api/user/$VUSER" --config "$CURL_AUTH_CONFIG" >/dev/null 2>&1 || true
+  VPID="$(ss -tlnp 2>/dev/null | grep '127.0.0.1:19999' | grep -oE 'pid=[0-9]+' | cut -d= -f2 || true)"
   if [ "$VRESULT" = "204" ]; then
     ok "ТУННЕЛЬ ПРОВЕРЕН: реальный клиент прошёл REALITY-хендшейк и получил трафик."
   else
@@ -453,7 +505,9 @@ PY
     warn "Смотри node/TROUBLESHOOTING.md — начни с версии xray-core."
   fi
 fi
-rm -f "$VERIFY_JSON"
+if [ "${REQUIRE_TUNNEL_VERIFY:-0}" = "1" ] && [ "${VRESULT:-}" != "204" ]; then
+  die "Не удалось проверить REALITY-туннель."
+fi
 
 echo
 echo -e "${G}ГОТОВО.${NC}"
