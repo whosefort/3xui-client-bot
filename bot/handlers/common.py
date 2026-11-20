@@ -1,15 +1,31 @@
 """Общие хелперы для хендлеров: цена/реквизиты, распознавание клиента, уведомления."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
 from .. import db
 from ..config import config
-from ..panels.base import Client
+from ..panels.base import Client, PanelClient
 from ..runtime import get_bot, get_panel
 
 log = logging.getLogger("handlers")
+binding_lock = asyncio.Lock()
+
+
+class BindingConflict(Exception):
+    pass
+
+
+async def bind_client(panel: PanelClient, client: Client, tg_id: int,
+                      tg_username: str | None = None) -> None:
+    """Под `binding_lock` проверить получателя и сохранить привязку."""
+    owner = await panel.find_by_tgid(tg_id)
+    if owner and owner.username != client.username:
+        raise BindingConflict("У этого Telegram-аккаунта уже есть другая подписка.")
+    await panel.bind_tgid(client=client, tg_id=tg_id)
+    db.save_client_binding(tg_id, tg_username, client.username, client.sub_url)
 
 
 def get_price() -> str:
@@ -36,19 +52,17 @@ async def resolve_client(tg_id: int) -> Optional[Client]:
     Источник правды — панель. username кэшируем в БД (client_email): при наличии
     кэша ищем по username, иначе по tgId.
     """
-    panel = get_panel()
-    user = db.get_user(tg_id)
-    username = user["client_email"] if user else None
-
-    client = (await panel.find_by_username(username)) if username else None
-    if client is None:
-        client = await panel.find_by_tgid(tg_id)
-    if client is None:
-        return None
-
-    db.upsert_user(tg_id, user["tg_username"] if user else None,
-                   client_email=client.username, sub_id=client.sub_url)
-    return client
+    async with binding_lock:
+        panel = get_panel()
+        user = db.get_user(tg_id)
+        username = user["client_email"] if user else None
+        client = await panel.find_by_username(username) if username else None
+        if not client or client.tg_id != tg_id:
+            client = await panel.find_by_tgid(tg_id)
+        if not client or client.tg_id != tg_id:
+            return None
+        db.upsert_user(tg_id, None, client_email=client.username, sub_id=client.sub_url)
+        return client
 
 
 async def notify_admins(text: str, reply_markup=None) -> None:

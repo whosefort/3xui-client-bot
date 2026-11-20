@@ -202,7 +202,7 @@ def clients_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def client_card_kb(email: str, enabled: bool) -> InlineKeyboardMarkup:
+def client_card_kb(email: str, enabled: bool, *, private_access: bool | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Продлить 30д", callback_data=f"cli:ext:{email}")      # месяц: сброс+лимит
     kb.button(text="📅 Продлить N мес", callback_data=f"cli:extn:{email}")   # N мес: N×лимит+сброс
@@ -211,13 +211,24 @@ def client_card_kb(email: str, enabled: bool) -> InlineKeyboardMarkup:
               callback_data=f"cli:tog:{email}")
     kb.button(text="🔗 Ссылка", callback_data=f"cli:lnk:{email}")
     kb.button(text="✉️ Написать", callback_data=f"cli:msg:{email}")
-    kb.button(text="🆔 Привязать tg_id", callback_data=f"cli:bind:{email}")
+    kb.button(text="🆔 Изменить Telegram ID", callback_data=f"cli:bind:{email}")
+    kb.button(text="🎟 Ссылка для привязки", callback_data=f"cli:invite:{email}")
+    if private_access is not None:
+        action = "privoff" if private_access else "privon"
+        kb.button(text="🔒 Отозвать персональный доступ" if private_access else "🔓 Выдать персональный доступ",
+                  callback_data=f"cli:{action}:{email}")
     kb.button(text="✏️ Подпись", callback_data=f"cli:label:{email}")
     kb.button(text="📝 Описание", callback_data=f"cli:note:{email}")
     kb.button(text="♾ Без ограничений", callback_data=f"cli:unlim:{email}")
     kb.button(text="🗑 Удалить", callback_data=f"cli:del:{email}")
     kb.button(text="↩️ К списку", callback_data="cli:list")
-    kb.adjust(2, 2, 2, 2, 1, 1, 1)
+    kb.adjust(2, 2, 2, 2, 2, 2, 1)
+    return kb.as_markup()
+
+
+def grant_without_id_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔑 Создать без Telegram ID", callback_data="grant:noid")
     return kb.as_markup()
 
 

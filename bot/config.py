@@ -74,6 +74,10 @@ class Config:
     # Опционально: чем создавать юзера. Пусто → берём ВСЕ инбаунды панели.
     marzban_proxies: Optional[dict] = field(default_factory=lambda: _json("MARZBAN_PROXIES", None))
     marzban_inbounds: Optional[dict] = field(default_factory=lambda: _json("MARZBAN_INBOUNDS", None))
+    private_marzban_url: str = os.getenv("PRIVATE_MARZBAN_URL", "").rstrip("/")
+    private_marzban_username: str = os.getenv("PRIVATE_MARZBAN_USERNAME", "")
+    private_marzban_password: str = os.getenv("PRIVATE_MARZBAN_PASSWORD", "")
+    private_marzban_inbound: str = os.getenv("PRIVATE_MARZBAN_INBOUND", "").strip()
 
     # Авторазвёртывание нод («Добавить сервер»): локальный HTTP-порт, по которому
     # bootstrap_token.sh забирает cert новой ноды по одноразовому токену.
@@ -155,6 +159,18 @@ class Config:
                 missing.append("XUI_USERNAME/XUI_PASSWORD")
         if missing:
             raise RuntimeError(f"Не заданы обязательные переменные .env: {', '.join(missing)}")
+
+        if self.private_marzban_url:
+            from urllib.parse import urlsplit
+            url = urlsplit(self.private_marzban_url)
+            shared = urlsplit(self.marzban_url)
+            if (url.scheme != "https" or not url.hostname or url.username is not None
+                    or url.query or url.fragment or url.hostname == shared.hostname):
+                raise RuntimeError("PRIVATE_MARZBAN_URL должен указывать на отдельный HTTPS-хост.")
+            if not (self.private_marzban_username and self.private_marzban_password
+                    and self.private_marzban_inbound):
+                raise RuntimeError("Для отдельной панели нужны PRIVATE_MARZBAN_USERNAME, "
+                                   "PRIVATE_MARZBAN_PASSWORD и PRIVATE_MARZBAN_INBOUND.")
 
         # Бэкап опционален — не валим старт, но предупреждаем о неполной настройке.
         if self.backup_enabled and not (self.r2_endpoint and self.r2_bucket

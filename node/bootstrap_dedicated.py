@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision one node and one user on an isolated Marzban panel."""
+"""Provision one node on an isolated Marzban panel."""
 
 import argparse
 import getpass
@@ -105,7 +105,9 @@ def main():
     parser.add_argument("--panel", required=True, help="HTTPS URL отдельной пустой панели")
     parser.add_argument("--node-ip", required=True, help="Публичный IP нового VPS")
     parser.add_argument("--panel-ip", required=True, help="IP панели для входящих правил UFW")
-    parser.add_argument("--username", required=True, help="Имя единственного клиента")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--username", help="Создать одного клиента с этим именем")
+    mode.add_argument("--node-only", action="store_true", help="Подготовить ноду для выдачи доступа через бота")
     parser.add_argument("--xray-version", default="v26.11.9")
     args = parser.parse_args()
 
@@ -120,7 +122,7 @@ def main():
     panel_ip = str(ipaddress.IPv4Address(args.panel_ip))
     if node_ip == panel_ip:
         parser.error("У панели и ноды должны быть разные IP.")
-    if not re.fullmatch(r"[a-zA-Z0-9_]{3,32}", args.username):
+    if args.username and not re.fullmatch(r"[a-zA-Z0-9_]{3,32}", args.username):
         parser.error("Имя клиента должно иметь 3–32 латинских буквы, цифры или подчёркивания.")
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.xray_version):
         parser.error("--xray-version должен быть тегом вида v26.11.9.")
@@ -150,7 +152,7 @@ def main():
         "PANEL_IP": panel_ip,
         "EXPECTED_NODE_IP": node_ip,
         "REQUIRE_TUNNEL_VERIFY": "1",
-        "NODE_NAME": f"dedicated-{args.username}",
+        "NODE_NAME": f"dedicated-{args.username or node_ip.replace('.', '-')}",
         "SERVICE_PORT": "62050",
         "XRAY_API_PORT": "62051",
         "NODE_IMAGE": node_image,
@@ -174,7 +176,10 @@ def main():
 
     if get_inbound(panel) != inbound:
         raise RuntimeError("REALITY-инбаунд изменился во время установки.")
-    print(issue_link(panel, args.username, inbound, node_ip))
+    if args.node_only:
+        print(f"Нода проверена. Укажите PRIVATE_MARZBAN_INBOUND={inbound} в настройках бота.")
+    else:
+        print(issue_link(panel, args.username, inbound, node_ip))
 
 
 if __name__ == "__main__":

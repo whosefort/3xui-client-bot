@@ -162,7 +162,7 @@ class MarzbanClient(PanelClient):
             return None
         # быстрый путь: наши юзеры называются u{tg_id}
         c = await self.find_by_username(self.username_for(tg_id))
-        if c:
+        if c and c.tg_id == tg_id:
             return c
         # медленный: старый клиент, привязанный через note tg:{id}
         for c in await self.list_clients():
@@ -175,20 +175,28 @@ class MarzbanClient(PanelClient):
         if not needle:
             return None
         for c in await self.list_clients():
-            if needle and needle in c.sub_url:
+            if c.matches_sub_id(needle):
                 return c
         return None
 
     # ---------- запись ----------
 
-    async def create_client(self, *, tg_id: int, days: int, traffic_gb: int) -> Client:
+    async def create_client(self, *, tg_id: int, days: int, traffic_gb: int,
+                            username: str | None = None) -> Client:
+        return await self.create_configured_client(
+            username=username or self.username_for(tg_id), tg_id=tg_id,
+            expire=int(time.time()) + days * 86400, limit=int(traffic_gb) * 1024 ** 3,
+        )
+
+    async def create_configured_client(self, *, username: str, tg_id: int,
+                                       expire: int, limit: int) -> Client:
         proxies, inbounds = await self._defaults()
         body = {
-            "username": self.username_for(tg_id),
+            "username": username,
             "proxies": proxies,
             "inbounds": inbounds,
-            "expire": int(time.time()) + days * 86400,
-            "data_limit": int(traffic_gb) * 1024 ** 3,
+            "expire": expire,
+            "data_limit": limit,
             "data_limit_reset_strategy": self.reset_strategy,   # month = авто-сброс
             "status": "active",
             "note": f"tg:{int(tg_id)}",
@@ -196,6 +204,13 @@ class MarzbanClient(PanelClient):
         u = await self._request("POST", "/api/user", json_body=body)
         self._invalidate()
         return self._to_client(u)
+
+    async def sync_plan(self, *, username: str, source: Client) -> None:
+        await self._request("PUT", f"/api/user/{username}", json_body={
+            "expire": source.expire_ts, "data_limit": source.limit_bytes,
+            "status": "active" if source.enabled else "disabled",
+        })
+        self._invalidate()
 
     async def extend_client(self, *, client: Client, add_days: int,
                             set_total_gb: Optional[int] = None, add_total_gb: int = 0,
@@ -240,9 +255,11 @@ class MarzbanClient(PanelClient):
 
     async def bind_tgid(self, *, client: Client, tg_id: int) -> None:
         # identity в Marzban = username; tg_id держим в note для наглядности/поиска.
-        await self._request("PUT", f"/api/user/{client.username}",
-                            json_body={"note": f"tg:{int(tg_id)}"})
+        updated = await self._request("PUT", f"/api/user/{client.username}",
+                                      json_body={"note": f"tg:{int(tg_id)}"})
         self._invalidate()
+        if not updated or self._to_client(updated).tg_id != tg_id:
+            raise PanelError("Marzban не подтвердил новый Telegram ID")
 
 
 def _loads(text: str) -> Any:

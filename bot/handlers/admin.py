@@ -12,11 +12,13 @@ import html
 import ipaddress
 import logging
 import subprocess
+from uuid import uuid4
 
 import aiohttp
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -37,9 +39,10 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          settings_kb, setup_start_kb, warp_domadd_categories_kb,
                          warp_domadd_domains_kb, warp_node_kb, warp_nodes_kb,
                          xray_channel_pick_kb, xray_upgrade_confirm_kb)
-from ..panels.base import Client
+from ..panels.base import Client, PanelError
+from ..panels.multi import MultiPanel
 from ..runtime import get_bot, get_panel
-from .common import get_traffic_gb
+from .common import BindingConflict, bind_client, binding_lock, get_traffic_gb
 
 log = logging.getLogger("admin")
 router = Router()
@@ -143,7 +146,9 @@ def _add_server_available() -> bool:
 
 
 @router.message(Command("start", "admin", "panel"))
-async def adm_start(message: Message, state: FSMContext) -> None:
+async def adm_start(message: Message, state: FSMContext, command: CommandObject) -> None:
+    if command.command == "start" and (command.args or "").startswith("claim_"):
+        raise SkipHandler
     await state.clear()
     await message.answer(
         "🛠 <b>Админ-панель</b>\nВыберите действие на клавиатуре ниже.",
@@ -245,9 +250,11 @@ async def cb_decision(cb: CallbackQuery) -> None:
 async def _approve_new(req) -> None:
     panel = get_panel()
     tg_id = req["tg_id"]
-    created = await panel.create_client(
-        tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
-    db.upsert_user(tg_id, req["tg_username"], client_email=created.username, sub_id=created.sub_url)
+    async with binding_lock:
+        created = await panel.find_by_tgid(tg_id)
+        if not created:
+            created = await _create_client(tg_id)
+        db.upsert_user(tg_id, req["tg_username"], client_email=created.username, sub_id=created.sub_url)
     await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.all_subs),
                          reply_markup=setup_start_kb())
 
@@ -348,7 +355,7 @@ async def _show_card(cb: CallbackQuery, email: str) -> None:
     note = db.get_client_note(email)
     await cb.message.edit_text(
         _card_text(cl, umap, labels, note),
-        reply_markup=client_card_kb(email, cl.enabled),
+        reply_markup=client_card_kb(email, cl.enabled, private_access=cl.private_access),
     )
 
 
@@ -437,9 +444,9 @@ async def cb_cli_sub(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminFSM.card_subtract)
     await state.update_data(sub_email=email)
     await cb.message.answer(
-        f"➖ На сколько <b>месяцев</b> УБАВИТЬ срок? Пришли число (1–60).\n"
-        f"Это коррекция даты окончания (если переборщил). Лимит и трафик не трогаю. "
-        f"Отмена — кнопка снизу."
+        "➖ На сколько <b>месяцев</b> УБАВИТЬ срок? Пришли число (1–60).\n"
+        "Это коррекция даты окончания (если переборщил). Лимит и трафик не трогаю. "
+        "Отмена — кнопка снизу."
     )
     await cb.answer()
 
@@ -475,12 +482,18 @@ async def card_subtract_input(message: Message, state: FSMContext) -> None:
 async def cb_cli_tog(cb: CallbackQuery) -> None:
     email = cb.data.split(":", 2)[2]
     panel = get_panel()
-    cl = await panel.find_by_username(email)
-    if not cl:
-        await cb.answer("Клиент не найден", show_alert=True)
+    try:
+        async with binding_lock:
+            cl = await panel.find_by_username(email)
+            if not cl:
+                await cb.answer("Клиент не найден", show_alert=True)
+                return
+            new_state = not cl.enabled
+            await panel.set_enabled(client=cl, enabled=new_state)
+    except Exception:
+        log.exception("Не удалось изменить статус клиента %s", email)
+        await cb.answer("Панель не подтвердила изменение доступа.", show_alert=True)
         return
-    new_state = not cl.enabled
-    await panel.set_enabled(client=cl, enabled=new_state)
     if cl.tg_id > 0:
         await _safe_user_msg(cl.tg_id, (
             "✅ Доступ к VPN возобновлён." if new_state
@@ -490,7 +503,7 @@ async def cb_cli_tog(cb: CallbackQuery) -> None:
     await cb.answer("Включён" if new_state else "Выключен")
 
 
-@router.callback_query(F.data.startswith("cli:lnk:"))
+@router.callback_query(F.data.startswith("cli:lnk:"), F.message.chat.type == "private")
 async def cb_cli_lnk(cb: CallbackQuery) -> None:
     email = cb.data.split(":", 2)[2]
     cl = await get_panel().find_by_username(email)
@@ -554,9 +567,9 @@ async def cb_cli_bind(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminFSM.card_bind)
     await state.update_data(bind_email=email)
     await cb.message.answer(
-        f"🆔 Пришлите <b>tg_id</b>, который привязать к клиенту "
+        f"🆔 Пришлите новый числовой <b>Telegram ID</b> для "
         f"<code>{html.escape(email)}</code>.\n"
-        f"Узнать id можно у @userinfobot. Для отмены — любая кнопка снизу."
+        "Если ID неизвестен, используйте «Ссылка для привязки» в карточке клиента."
     )
     await cb.answer()
 
@@ -571,22 +584,77 @@ async def card_bind_input(message: Message, state: FSMContext) -> None:
         await message.answer("Нужен положительный числовой tg_id. Отменено.")
         return
     panel = get_panel()
-    cl = await panel.find_by_username(email)
-    if not cl:
-        await message.answer("Клиент не найден (удалён?).")
-        return
     try:
-        await panel.bind_tgid(client=cl, tg_id=tg_id)
+        async with binding_lock:
+            cl = await panel.find_by_username(email)
+            if not cl:
+                await message.answer("Клиент не найден.")
+                return
+            await bind_client(panel, cl, tg_id)
+    except BindingConflict as exc:
+        await message.answer(str(exc))
+        return
     except Exception:  # noqa: BLE001
         log.exception("manual bind failed")
         await message.answer("❌ Ошибка панели — привязать не удалось. См. логи.")
         return
-    user = db.get_user(tg_id)
-    db.upsert_user(tg_id, user["tg_username"] if user else None,
-                   client_email=cl.username, sub_id=cl.sub_url)
-    await message.answer(f"✅ Привязан tg_id <code>{tg_id}</code> к <code>{html.escape(email)}</code>.")
+    await message.answer(f"✅ Telegram ID клиента <code>{html.escape(email)}</code> обновлён на "
+                         f"<code>{tg_id}</code>.")
     await _safe_user_msg(tg_id, "🔗 Администратор привязал вашу подписку к этому чату. "
                                 "Нажмите /start и «📊 Моя подписка».")
+
+
+def _invite_text(bot_username: str, client: Client) -> str:
+    token = db.create_client_invite(client.username)
+    url = f"https://t.me/{bot_username}?start=claim_{token}"
+    return (
+        f"🎟 Приглашение для <code>{html.escape(client.username)}</code>\n"
+        f"<code>{url}</code>\n\n"
+        "Отправьте ссылку получателю в личку. Она действует 24 часа и привязывает "
+        "подписку к аккаунту, который активирует её первым."
+    )
+
+
+@router.callback_query(F.data.startswith("cli:invite:"), F.message.chat.type == "private")
+async def cb_cli_invite(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    email = cb.data.split(":", 2)[2]
+    bot_username = (await get_bot().me()).username
+    async with binding_lock:
+        cl = await get_panel().find_by_username(email)
+        if not cl:
+            await cb.answer("Клиент не найден", show_alert=True)
+            return
+        text = _invite_text(bot_username, cl)
+    await cb.message.answer(text)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith(("cli:privon:", "cli:privoff:")), F.message.chat.type == "private")
+async def cb_cli_private(cb: CallbackQuery) -> None:
+    _, action, email = cb.data.split(":", 2)
+    panel = get_panel()
+    if not isinstance(panel, MultiPanel) or not panel.private:
+        await cb.answer("Персональная панель не настроена.", show_alert=True)
+        return
+    try:
+        async with binding_lock:
+            cl = await panel.find_by_username(email)
+            if not cl:
+                await cb.answer("Клиент не найден", show_alert=True)
+                return
+            await panel.set_private_access(client=cl, enabled=action == "privon")
+    except PanelError as exc:
+        log.warning("Не удалось изменить персональный доступ %s: %s", email, exc)
+        await cb.answer("Персональная панель не подтвердила операцию. Проверьте статус подписки и логи.",
+                        show_alert=True)
+        return
+    except Exception:
+        log.exception("Не удалось изменить персональный доступ %s", email)
+        await cb.answer("Персональная панель не ответила.", show_alert=True)
+        return
+    await _show_card(cb, email)
+    await cb.answer("Персональный доступ выдан" if action == "privon" else "Персональный доступ отозван")
 
 
 @router.callback_query(F.data.startswith("cli:label:"))
@@ -707,10 +775,12 @@ async def cb_cli_delok(cb: CallbackQuery) -> None:
     email = cb.data.split(":", 2)[2]
     panel = get_panel()
     # Узнаём tg_id ДО удаления, чтобы потом уведомить пользователя.
-    cl = await panel.find_by_username(email)
-    tgid = cl.tg_id if cl else 0
     try:
-        await panel.delete_client(email)
+        async with binding_lock:
+            cl = await panel.find_by_username(email)
+            tgid = cl.tg_id if cl else 0
+            await panel.delete_client(email)
+            db.revoke_client_invite(email)
     except Exception:  # noqa: BLE001
         log.exception("Ошибка удаления клиента %s", email)
         await cb.answer("Не удалось удалить (панель недоступна?). См. логи.", show_alert=True)
@@ -731,8 +801,9 @@ async def cb_cli_delok(cb: CallbackQuery) -> None:
 async def kb_grant(message: Message, state: FSMContext) -> None:
     await state.set_state(AdminFSM.grant)
     await message.answer(
-        "➕ Введите <b>tg_id</b> пользователя, которому выдать/продлить подписку.\n"
-        "Узнать id можно у @userinfobot. Для отмены — любая кнопка снизу."
+        "➕ Введите <b>Telegram ID</b>, чтобы выдать или продлить подписку. "
+        "Если ID неизвестен, создайте подписку с приглашением.",
+        reply_markup=kb.grant_without_id_kb() if message.chat.type == "private" else None,
     )
 
 
@@ -740,7 +811,7 @@ def _parse_tgid(arg: str) -> int | None:
     """Только положительный tg_id. Отсекает 0 и отрицательные — иначе /grant 0
     цепляет первого непривязанного клиента, а /grant -N плодит мусор в панели."""
     arg = (arg or "").strip()
-    if arg.isdigit() and int(arg) > 0:
+    if arg.isascii() and arg.isdecimal() and len(arg) <= 16 and 0 < int(arg) < 2 ** 52:
         return int(arg)
     return None
 
@@ -755,24 +826,56 @@ async def grant_input(message: Message, state: FSMContext) -> None:
     await message.answer(await _do_grant(tg_id))
 
 
+async def _create_client(tg_id: int = 0) -> Client:
+    panel = get_panel()
+    username = panel.username_for(tg_id) if tg_id else ""
+    if len(username) < 3 or await panel.find_by_username(username):
+        username = "client_" + uuid4().hex[:24]
+    return await panel.create_client(
+        tg_id=tg_id, username=username, days=config.plan_days, traffic_gb=get_traffic_gb(),
+    )
+
+
+@router.callback_query(F.data == "grant:noid", F.message.chat.type == "private")
+async def cb_grant_noid(cb: CallbackQuery, state: FSMContext) -> None:
+    try:
+        bot_username = (await get_bot().me()).username
+        async with binding_lock:
+            if await state.get_state() != AdminFSM.grant.state:
+                await cb.answer("Снова откройте «Выдать вручную».", show_alert=True)
+                return
+            await state.clear()
+            cl = await _create_client()
+            text = _invite_text(bot_username, cl)
+    except Exception:
+        log.exception("Не удалось создать подписку без Telegram ID")
+        await cb.answer("Панель не подтвердила выдачу. Проверьте список клиентов.", show_alert=True)
+        return
+    links = "\n".join(f"<code>{html.escape(url)}</code>" for url in cl.all_subs)
+    if links:
+        text += "\n\nКлючи подписки для ручной настройки\n" + links
+    await cb.message.answer(text)
+    await cb.answer("Подписка создана")
+
+
 async def _do_grant(tg_id: int) -> str:
     panel = get_panel()
     user = db.get_user(tg_id)
     uname = user["tg_username"] if user else None
     try:
-        existing = await panel.find_by_tgid(tg_id)
+        async with binding_lock:
+            existing = await panel.find_by_tgid(tg_id)
+            if existing:
+                cl = await panel.extend_client(
+                    client=existing, add_days=config.plan_days,
+                    set_total_gb=get_traffic_gb(), reset_traffic=True)
+            else:
+                cl = await _create_client(tg_id)
+            db.upsert_user(tg_id, uname, client_email=cl.username, sub_id=cl.sub_url)
         if existing:
-            await panel.extend_client(
-                client=existing, add_days=config.plan_days,
-                set_total_gb=get_traffic_gb(), reset_traffic=True)   # свежий месяц
-            db.upsert_user(tg_id, uname, client_email=existing.username,
-                           sub_id=existing.sub_url)
             await _safe_user_msg(tg_id, texts.renewed(config.plan_days))
             return f"✅ Продлено на {config.plan_days} дн. для {tg_id}"
-        created = await panel.create_client(
-            tg_id=tg_id, days=config.plan_days, traffic_gb=get_traffic_gb())
-        db.upsert_user(tg_id, uname, client_email=created.username, sub_id=created.sub_url)
-        await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.all_subs),
+        await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, cl.all_subs),
                              reply_markup=setup_start_kb())
         return f"✅ Создана подписка для {tg_id}"
     except Exception:  # noqa: BLE001

@@ -1,12 +1,12 @@
 """Пользовательские хендлеры: статус, покупка/продление (заявки), поддержка."""
 from __future__ import annotations
 
-import asyncio
 import html
 import logging
+import re
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -17,7 +17,8 @@ from ..keyboards import (back_to_menu, bind_ok_kb, confirm_paid, faq_answer_kb,
                         faq_kb, main_menu, setup_done_kb, setup_step1_kb,
                         setup_step2_kb, setup_step3_kb, status_kb, sub_fallback_kb)
 from ..runtime import get_panel
-from .common import get_price, get_requisites, notify_admins, resolve_client
+from .common import (BindingConflict, bind_client, binding_lock, get_price,
+                     get_requisites, notify_admins, resolve_client)
 
 log = logging.getLogger("user")
 router = Router()
@@ -52,8 +53,12 @@ async def _show_menu(target: Message, tg_id: int) -> None:
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext) -> None:
+async def cmd_start(message: Message, state: FSMContext, command: CommandObject) -> None:
     await state.clear()
+    args = command.args or ""
+    if args.startswith("claim_"):
+        await _claim_invite(message, args.removeprefix("claim_"))
+        return
     tg_id = message.from_user.id
     db.upsert_user(tg_id, _uname(message))
     has_sub = await resolve_client(tg_id) is not None
@@ -68,7 +73,7 @@ async def cb_menu(cb: CallbackQuery) -> None:
     await cb.answer()
 
 
-@router.callback_query(F.data == "status")
+@router.callback_query(F.data == "status", F.message.chat.type == "private")
 async def cb_status(cb: CallbackQuery) -> None:
     cl = await resolve_client(cb.from_user.id)
     if not cl:
@@ -109,7 +114,7 @@ async def cb_faq_answer(cb: CallbackQuery) -> None:
     await cb.answer()
 
 
-@router.callback_query(F.data == "sub_fallback")
+@router.callback_query(F.data == "sub_fallback", F.message.chat.type == "private")
 async def cb_sub_fallback(cb: CallbackQuery) -> None:
     cl = await resolve_client(cb.from_user.id)
     if not cl:
@@ -128,7 +133,7 @@ async def cb_setup_1(cb: CallbackQuery) -> None:
     await cb.answer()
 
 
-@router.callback_query(F.data == "setup:2")
+@router.callback_query(F.data == "setup:2", F.message.chat.type == "private")
 async def cb_setup_2(cb: CallbackQuery) -> None:
     cl = await resolve_client(cb.from_user.id)
     if not cl:
@@ -192,12 +197,32 @@ async def cb_have_sub(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
 
 
-# Один общий лок на все привязки: без него два пользователя (или два тапа
-# одного), почти одновременно назвавшие один sub_id, оба проходят проверку
-# "client.tg_id ещё не занят" до того, как первый успевает реально
-# привязаться — второй bind_tgid() молча перезаписывает первого владельца.
-# Привязка — редкое разовое действие, глобальная сериализация тут не проблема.
-_bind_lock = asyncio.Lock()
+async def _claim_invite(message: Message, token: str) -> None:
+    if message.chat.type != "private":
+        await message.answer("Откройте приглашение в личном чате с ботом.")
+        return
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32}", token):
+        await message.answer("Приглашение недействительно.")
+        return
+    tg_id = message.from_user.id
+    panel = get_panel()
+    try:
+        async with binding_lock:
+            username = db.claim_client_invite(token, tg_id)
+            client = await panel.find_by_username(username) if username else None
+            if not client:
+                await message.answer("Приглашение недействительно или уже использовано.")
+                return
+            await bind_client(panel, client, tg_id, _uname(message))
+    except BindingConflict as exc:
+        db.release_client_invite(token, tg_id)
+        await message.answer(str(exc))
+        return
+    except Exception:
+        log.exception("Ошибка активации приглашения для tg_id=%s", tg_id)
+        await message.answer("Панель не ответила. Откройте ту же ссылку чуть позже.")
+        return
+    await message.answer(texts.bind_ok(), reply_markup=bind_ok_kb())
 
 
 @router.message(Bind.waiting, F.text)
@@ -209,7 +234,7 @@ async def bind_input(message: Message, state: FSMContext) -> None:
     if not sub_id:
         await message.answer(texts.bind_bad_input(), reply_markup=back_to_menu())
         return
-    async with _bind_lock:
+    async with binding_lock:
         client = await panel.find_by_subid(sub_id)
         if not client:
             await message.answer(texts.bind_not_found(), reply_markup=back_to_menu())
@@ -223,8 +248,11 @@ async def bind_input(message: Message, state: FSMContext) -> None:
                 f"(уже за tgId <code>{client.tg_id}</code>)."
             )
             return
-        await panel.bind_tgid(client=client, tg_id=me)
-    db.upsert_user(me, _uname(message), client_email=client.username, sub_id=client.sub_url)
+        try:
+            await bind_client(panel, client, me, _uname(message))
+        except BindingConflict as exc:
+            await message.answer(str(exc), reply_markup=back_to_menu())
+            return
     await message.answer(texts.bind_ok(), reply_markup=bind_ok_kb())
     await notify_admins(
         f"🔗 {html.escape(_uname(message) or str(me))} (id <code>{me}</code>) "

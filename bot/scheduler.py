@@ -38,7 +38,7 @@ async def reminders_sweep() -> None:
         try:
             tg_id = user["tg_id"]
             client = by_name.get(user["client_email"])
-            if not client:
+            if not client or client.tg_id != tg_id:
                 continue
             checked += 1
 

@@ -27,10 +27,19 @@ def build_panel() -> PanelClient:
     """PANELS=marzban,xui — несколько панелей, первая главная (bot/panels/multi.py).
     Без PANELS — одна панель по PANEL_BACKEND, как раньше."""
     kinds = config.panels
-    if len(kinds) == 1:
+    if len(kinds) == 1 and not config.private_marzban_url:
         return _build_one(kinds[0])
     from .multi import MultiPanel
-    return MultiPanel([(k, _build_one(k)) for k in kinds])
+    private = None
+    if config.private_marzban_url:
+        from .marzban import MarzbanClient
+        private = MarzbanClient(
+            config.private_marzban_url, config.private_marzban_username,
+            config.private_marzban_password, reset_strategy=config.marzban_reset_strategy,
+            proxies={"vless": {"flow": "xtls-rprx-vision"}},
+            inbounds={"vless": [config.private_marzban_inbound]},
+        )
+    return MultiPanel([(k, _build_one(k)) for k in kinds], private=private)
 
 
 __all__ = ["Client", "PanelClient", "PanelError", "build_panel"]

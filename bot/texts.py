@@ -101,12 +101,11 @@ def faq_answer(item_id: str) -> str | None:
 
 def _subs(sub_url) -> str:
     """Одна ссылка или несколько (PANELS из нескольких панелей)."""
-    urls = [u for u in (sub_url if isinstance(sub_url, (list, tuple)) else [sub_url]) if u]
+    urls = [html.escape(u) for u in (sub_url if isinstance(sub_url, (list, tuple)) else [sub_url]) if u]
     if len(urls) <= 1:
         return f"🔗 Ваша ссылка-подписка:\n<code>{urls[0] if urls else '—'}</code>"
     body = "\n".join(f"{i}. <code>{u}</code>" for i, u in enumerate(urls, 1))
-    return ("🔗 Ваши ссылки-подписки (разные серверы — добавьте <b>обе</b> в Happ, "
-            f"каждую отдельно):\n{body}")
+    return f"🔗 Добавьте каждую ссылку-подписку в Happ отдельно.\n{body}"
 
 
 def status_active(days: int, sub_url: str) -> str:

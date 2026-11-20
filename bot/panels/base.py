@@ -10,6 +10,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urlsplit
 
 
 class PanelError(Exception):
@@ -29,10 +30,15 @@ class Client:
     raw: dict = field(default_factory=dict)  # сырой объект бэкенда (для отладки)
     # Ссылки вторичных панелей (PANELS из нескольких) — клиент получает все.
     extra_subs: list = field(default_factory=list)
+    private_access: bool | None = None
 
     @property
     def all_subs(self) -> list:
         return [u for u in [self.sub_url, *self.extra_subs] if u]
+
+    def matches_sub_id(self, sub_id: str) -> bool:
+        return bool(self.sub_url and sub_id
+                    and urlsplit(self.sub_url).path.rstrip("/").rsplit("/", 1)[-1] == sub_id)
 
     @property
     def days_left(self) -> Optional[int]:
@@ -71,7 +77,8 @@ class PanelClient(ABC):
 
     # ---- запись ----
     @abstractmethod
-    async def create_client(self, *, tg_id: int, days: int, traffic_gb: int) -> Client: ...
+    async def create_client(self, *, tg_id: int, days: int, traffic_gb: int,
+                            username: str | None = None) -> Client: ...
 
     @abstractmethod
     async def extend_client(self, *, client: Client, add_days: int,

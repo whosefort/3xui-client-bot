@@ -7,11 +7,13 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets
 import sqlite3
 import threading
 import time
-from typing import Any, Optional
+from typing import Optional
 
 _lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
@@ -83,6 +85,17 @@ def init(db_path: str) -> None:
             note            TEXT NOT NULL,
             set_by          INTEGER NOT NULL,
             set_at          INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS client_invites (
+            client_username TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at INTEGER NOT NULL,
+            claimed_by INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS private_access (
+            client_username TEXT PRIMARY KEY,
+            panel_username TEXT NOT NULL UNIQUE
         );
 
         -- Одноразовые токены для авторазвёртывания ноды («Добавить сервер»):
@@ -162,6 +175,82 @@ def upsert_user(tg_id: int, tg_username: str | None,
 def get_user(tg_id: int) -> Optional[sqlite3.Row]:
     with _lock:
         return _c().execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+
+
+def save_client_binding(tg_id: int, tg_username: str | None, client: str, sub_url: str) -> None:
+    with _lock, _c() as conn:
+        conn.execute(
+            "UPDATE users SET client_email=NULL, sub_id=NULL, linked_at=NULL "
+            "WHERE client_email=? AND tg_id<>?", (client, tg_id),
+        )
+        conn.execute(
+            "INSERT INTO users(tg_id,tg_username,client_email,sub_id,linked_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(tg_id) DO UPDATE SET tg_username=COALESCE(excluded.tg_username,users.tg_username), "
+            "client_email=excluded.client_email, sub_id=excluded.sub_id, linked_at=excluded.linked_at",
+            (tg_id, tg_username, client, sub_url, int(time.time())),
+        )
+        conn.execute("DELETE FROM client_invites WHERE client_username=?", (client,))
+
+
+def create_client_invite(client: str) -> str:
+    token = secrets.token_urlsafe(24)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with _lock, _c() as conn:
+        conn.execute("DELETE FROM client_invites WHERE expires_at<=?", (int(time.time()),))
+        conn.execute(
+            "INSERT INTO client_invites(client_username,token_hash,expires_at) VALUES(?,?,?) "
+            "ON CONFLICT(client_username) DO UPDATE SET token_hash=excluded.token_hash, "
+            "expires_at=excluded.expires_at, claimed_by=NULL",
+            (client, token_hash, int(time.time()) + 86400),
+        )
+    return token
+
+
+def claim_client_invite(token: str, tg_id: int) -> Optional[str]:
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with _lock, _c() as conn:
+        row = conn.execute(
+            "UPDATE client_invites SET claimed_by=? "
+            "WHERE token_hash=? AND expires_at>? AND (claimed_by IS NULL OR claimed_by=?) "
+            "RETURNING client_username",
+            (tg_id, token_hash, int(time.time()), tg_id),
+        ).fetchone()
+    return row["client_username"] if row else None
+
+
+def release_client_invite(token: str, tg_id: int) -> None:
+    with _lock, _c() as conn:
+        conn.execute(
+            "UPDATE client_invites SET claimed_by=NULL WHERE token_hash=? AND claimed_by=?",
+            (hashlib.sha256(token.encode()).hexdigest(), tg_id),
+        )
+
+
+def revoke_client_invite(client: str) -> None:
+    with _lock, _c() as conn:
+        conn.execute("DELETE FROM client_invites WHERE client_username=?", (client,))
+
+
+def private_account(client: str) -> Optional[str]:
+    with _lock:
+        row = _c().execute(
+            "SELECT panel_username FROM private_access WHERE client_username=?", (client,),
+        ).fetchone()
+    return row["panel_username"] if row else None
+
+
+def remember_private_account(client: str) -> str:
+    with _lock, _c() as conn:
+        return conn.execute(
+            "INSERT INTO private_access(client_username,panel_username) VALUES(?,?) "
+            "ON CONFLICT(client_username) DO UPDATE SET client_username=excluded.client_username "
+            "RETURNING panel_username", (client, "priv_" + secrets.token_hex(12)),
+        ).fetchone()["panel_username"]
+
+
+def forget_private_account(client: str) -> None:
+    with _lock, _c() as conn:
+        conn.execute("DELETE FROM private_access WHERE client_username=?", (client,))
 
 
 def all_linked_users() -> list[sqlite3.Row]:

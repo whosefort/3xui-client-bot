@@ -172,14 +172,15 @@ class XUIClient(PanelClient):
         if not needle:
             return None
         for c in await self.list_clients():
-            if needle == (c.raw.get("subId") or "") or needle in c.sub_url:
+            if needle == (c.raw.get("subId") or "") or c.matches_sub_id(needle):
                 return c
         return None
 
     # ---------- запись ----------
 
-    async def create_client(self, *, tg_id: int, days: int, traffic_gb: int) -> Client:
-        email = self.username_for(tg_id)
+    async def create_client(self, *, tg_id: int, days: int, traffic_gb: int,
+                            username: str | None = None) -> Client:
+        email = username or self.username_for(tg_id)
         sub_id = uuid.uuid4().hex[:16]
         client = {
             "email": email, "uuid": str(uuid.uuid4()), "subId": sub_id,
