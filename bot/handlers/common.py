@@ -7,8 +7,8 @@ from typing import Optional
 
 from .. import db
 from ..config import config
-from ..panels.base import Client, PanelClient
-from ..runtime import get_bot, get_panel
+from ..panels.base import Client, PanelClient, PanelError
+from ..runtime import get_bot, get_panel, panel_for, panel_key_for
 
 log = logging.getLogger("handlers")
 binding_lock = asyncio.Lock()
@@ -21,11 +21,15 @@ class BindingConflict(Exception):
 async def bind_client(panel: PanelClient, client: Client, tg_id: int,
                       tg_username: str | None = None) -> None:
     """Под `binding_lock` проверить получателя и сохранить привязку."""
+    key = panel_key_for(panel)
+    existing = db.get_user(tg_id)
+    if existing and existing["client_email"] and existing["panel_key"] != key:
+        raise BindingConflict("У этого Telegram-аккаунта уже есть подписка на другой панели.")
     owner = await panel.find_by_tgid(tg_id)
     if owner and owner.username != client.username:
         raise BindingConflict("У этого Telegram-аккаунта уже есть другая подписка.")
     await panel.bind_tgid(client=client, tg_id=tg_id)
-    db.save_client_binding(tg_id, tg_username, client.username, client.sub_url)
+    db.save_client_binding(tg_id, tg_username, client.username, client.sub_url, key)
 
 
 def get_price() -> str:
@@ -53,8 +57,13 @@ async def resolve_client(tg_id: int) -> Optional[Client]:
     кэша ищем по username, иначе по tgId.
     """
     async with binding_lock:
-        panel = get_panel()
         user = db.get_user(tg_id)
+        key = user["panel_key"] if user else ""
+        try:
+            panel = panel_for(key) if key else get_panel()
+        except PanelError:
+            log.warning("Панель подписки %s не подключена", key)
+            return None
         username = user["client_email"] if user else None
         client = await panel.find_by_username(username) if username else None
         if not client or client.tg_id != tg_id:

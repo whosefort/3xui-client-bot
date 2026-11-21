@@ -138,11 +138,14 @@ def confirm_paid(kind: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def admin_decision(req_id: int) -> InlineKeyboardMarkup:
+def admin_decision(req_id: int, *, allow_reject: bool = True, choose_panel: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Подтвердить", callback_data=f"adm:ok:{req_id}")
-    kb.button(text="❌ Отклонить", callback_data=f"adm:no:{req_id}")
-    kb.adjust(2)
+    if allow_reject:
+        kb.button(text="❌ Отклонить", callback_data=f"adm:no:{req_id}")
+    if choose_panel:
+        kb.button(text="🖥 Выбрать 3x-ui", callback_data=f"adm:pick:{req_id}")
+    kb.adjust(2, 1)
     return kb.as_markup()
 
 
@@ -164,10 +167,11 @@ ADM_BROADCAST = "📢 Рассылка"
 ADM_ADD_SERVER = "🖥 Добавить сервер"
 ADM_SERVERS = "🌍 Серверы"
 ADM_REALITY = "🛡 Соединение"
+ADM_XUI = "🖥 Панели 3x-ui"
 
 
 def admin_kb(show_add_server: bool = False, show_servers: bool = False,
-             show_reality: bool = False) -> ReplyKeyboardMarkup:
+             show_reality: bool = False, show_xui: bool = False) -> ReplyKeyboardMarkup:
     """Постоянная клавиатура под полем ввода у админа."""
     kb = ReplyKeyboardBuilder()
     kb.button(text=ADM_REQUESTS)
@@ -186,6 +190,9 @@ def admin_kb(show_add_server: bool = False, show_servers: bool = False,
         kb.button(text=ADM_ADD_SERVER)
     if tail:
         rows.append(tail)
+    if show_xui:
+        kb.button(text=ADM_XUI)
+        rows.append(1)
     kb.adjust(*rows)
     return kb.as_markup(resize_keyboard=True, is_persistent=True)
 
@@ -226,9 +233,12 @@ def client_card_kb(email: str, enabled: bool, *, private_access: bool | None = N
     return kb.as_markup()
 
 
-def grant_without_id_kb() -> InlineKeyboardMarkup:
+def grant_without_id_kb(*, show_xui: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🔑 Создать без Telegram ID", callback_data="grant:noid")
+    if show_xui:
+        kb.button(text="🖥 Выдать на 3x-ui", callback_data="xu:home")
+    kb.adjust(1)
     return kb.as_markup()
 
 

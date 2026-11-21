@@ -31,6 +31,7 @@ class Client:
     # Ссылки вторичных панелей (PANELS из нескольких) — клиент получает все.
     extra_subs: list = field(default_factory=list)
     private_access: bool | None = None
+    panel_status: str | None = None
 
     @property
     def all_subs(self) -> list:
@@ -50,9 +51,21 @@ class Client:
     def exhausted(self) -> bool:
         return self.limit_bytes > 0 and self.used_bytes >= self.limit_bytes
 
+    @property
+    def access_status(self) -> str:
+        if self.panel_status == "disabled":
+            return "paused"
+        if self.panel_status == "expired" or 0 < self.expire_ts <= time.time():
+            return "expired"
+        if self.panel_status == "limited" or self.exhausted:
+            return "limited"
+        if self.panel_status == "on_hold":
+            return "on_hold"
+        return "active" if self.enabled else "paused"
+
 
 class PanelClient(ABC):
-    """Единый интерфейс панели. Все методы идемпотентны по username."""
+    """Единый интерфейс для подписок разных панелей."""
 
     @staticmethod
     def username_for(tg_id: int) -> str:
@@ -83,10 +96,11 @@ class PanelClient(ABC):
     @abstractmethod
     async def extend_client(self, *, client: Client, add_days: int,
                             set_total_gb: Optional[int] = None, add_total_gb: int = 0,
-                            reset_traffic: bool = False) -> Client:
+                            reset_traffic: bool = False, expires_at: int | None = None) -> Client:
         """Сдвинуть срок (add_days может быть отрицательным — коррекция вниз).
         Лимит: set_total_gb — жёстко; add_total_gb — прибавить; иначе не трогаем.
-        reset_traffic — обнулить счётчик."""
+        reset_traffic — обнулить счётчик. expires_at задаёт абсолютный срок
+        для повтора продления и не сокращает срок, если тот уже больше."""
 
     @abstractmethod
     async def set_enabled(self, *, client: Client, enabled: bool) -> None: ...

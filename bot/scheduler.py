@@ -14,22 +14,17 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from . import db, texts
 from .config import config
 from .keyboards import reminder_kb
-from .runtime import get_bot, get_panel
+from .runtime import get_bot, panel_for
 
 log = logging.getLogger("scheduler")
 
 
 async def reminders_sweep() -> None:
-    panel = get_panel()
     bot = get_bot()
     buckets = sorted(config.remind_days_before, reverse=True)  # напр. [3,1,0]
     checked = sent = 0
 
-    try:
-        by_name = {c.username: c for c in await panel.list_clients()}
-    except Exception as e:  # noqa: BLE001
-        log.error("Обход напоминаний прерван — панель недоступна: %s", e)
-        return
+    by_panel = {}
 
     for user in db.all_linked_users():
         # Весь разбор одного клиента — под try. Один битый клиент (мусорный
@@ -37,7 +32,14 @@ async def reminders_sweep() -> None:
         # обход: иначе все следующие юзеры молча не получат напоминание.
         try:
             tg_id = user["tg_id"]
-            client = by_name.get(user["client_email"])
+            key = user["panel_key"]
+            if key not in by_panel:
+                try:
+                    by_panel[key] = {c.username: c for c in await panel_for(key).list_clients()}
+                except Exception as e:
+                    log.warning("Панель недоступна для напоминаний (%s): %s", key or "default", type(e).__name__)
+                    by_panel[key] = {}
+            client = by_panel[key].get(user["client_email"])
             if not client or client.tg_id != tg_id:
                 continue
             checked += 1

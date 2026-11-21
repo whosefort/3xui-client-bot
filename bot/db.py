@@ -45,10 +45,19 @@ def init(db_path: str) -> None:
             tg_id       INTEGER NOT NULL,
             tg_username TEXT,
             type        TEXT NOT NULL,              -- new | renew
-            status      TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
+            status      TEXT NOT NULL DEFAULT 'pending', -- pending|processing|approved|rejected
             created_at  INTEGER NOT NULL,
             decided_at  INTEGER,
-            admin_id    INTEGER
+            admin_id    INTEGER,
+            replay_safe INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS request_renewals (
+            request_id      INTEGER PRIMARY KEY,
+            client_username TEXT,
+            expires_at      INTEGER,
+            traffic_gb      INTEGER,
+            plan_applied    INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS settings (
@@ -88,10 +97,12 @@ def init(db_path: str) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS client_invites (
-            client_username TEXT PRIMARY KEY,
+            client_username TEXT NOT NULL,
             token_hash TEXT NOT NULL UNIQUE,
             expires_at INTEGER NOT NULL,
-            claimed_by INTEGER
+            claimed_by INTEGER,
+            panel_key TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (panel_key, client_username)
         );
         CREATE TABLE IF NOT EXISTS private_access (
             client_username TEXT PRIMARY KEY,
@@ -124,6 +135,48 @@ def init(db_path: str) -> None:
         )
     except sqlite3.OperationalError:
         pass  # уже применена в прошлый запуск
+    request_columns = {row["name"] for row in _conn.execute("PRAGMA table_info(requests)")}
+    if "replay_safe" not in request_columns:
+        _conn.execute("ALTER TABLE requests ADD COLUMN replay_safe INTEGER NOT NULL DEFAULT 0")
+    for name, sql in (
+        ("panel_key", "ALTER TABLE requests ADD COLUMN panel_key TEXT"),
+        ("inbound_id", "ALTER TABLE requests ADD COLUMN inbound_id INTEGER"),
+    ):
+        if name not in request_columns:
+            _conn.execute(sql)
+    user_columns = {row["name"] for row in _conn.execute("PRAGMA table_info(users)")}
+    if "panel_key" not in user_columns:
+        _conn.execute("ALTER TABLE users ADD COLUMN panel_key TEXT NOT NULL DEFAULT ''")
+    invite_columns = {row["name"] for row in _conn.execute("PRAGMA table_info(client_invites)")}
+    if "panel_key" not in invite_columns:
+        _conn.execute("SAVEPOINT scope_invites")
+        try:
+            _conn.execute("ALTER TABLE client_invites RENAME TO client_invites_legacy")
+            _conn.execute("""
+                CREATE TABLE client_invites (
+                    client_username TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    expires_at INTEGER NOT NULL,
+                    claimed_by INTEGER,
+                    panel_key TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (panel_key, client_username)
+                )
+            """)
+            _conn.execute("""
+                INSERT INTO client_invites(client_username,token_hash,expires_at,claimed_by)
+                SELECT client_username,token_hash,expires_at,claimed_by FROM client_invites_legacy
+            """)
+            _conn.execute("DROP TABLE client_invites_legacy")
+        except Exception:
+            _conn.execute("ROLLBACK TO scope_invites")
+            raise
+        finally:
+            _conn.execute("RELEASE scope_invites")
+    # Один polling-процесс. Возвращаем заявки, захваченные новым обработчиком,
+    # для которого повтор безопасен даже после частичного изменения в панели.
+    _conn.execute(
+        "UPDATE requests SET status='pending' WHERE status='processing' AND replay_safe=1"
+    )
     _conn.commit()
 
 
@@ -177,45 +230,48 @@ def get_user(tg_id: int) -> Optional[sqlite3.Row]:
         return _c().execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
 
 
-def save_client_binding(tg_id: int, tg_username: str | None, client: str, sub_url: str) -> None:
+def save_client_binding(tg_id: int, tg_username: str | None, client: str, sub_url: str,
+                        panel_key: str = "") -> None:
     with _lock, _c() as conn:
         conn.execute(
             "UPDATE users SET client_email=NULL, sub_id=NULL, linked_at=NULL "
-            "WHERE client_email=? AND tg_id<>?", (client, tg_id),
+            "WHERE client_email=? AND tg_id<>? AND panel_key=?", (client, tg_id, panel_key),
         )
         conn.execute(
-            "INSERT INTO users(tg_id,tg_username,client_email,sub_id,linked_at) VALUES(?,?,?,?,?) "
+            "INSERT INTO users(tg_id,tg_username,client_email,sub_id,linked_at,panel_key) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(tg_id) DO UPDATE SET tg_username=COALESCE(excluded.tg_username,users.tg_username), "
-            "client_email=excluded.client_email, sub_id=excluded.sub_id, linked_at=excluded.linked_at",
-            (tg_id, tg_username, client, sub_url, int(time.time())),
+            "client_email=excluded.client_email, sub_id=excluded.sub_id, linked_at=excluded.linked_at, "
+            "panel_key=excluded.panel_key",
+            (tg_id, tg_username, client, sub_url, int(time.time()), panel_key),
         )
-        conn.execute("DELETE FROM client_invites WHERE client_username=?", (client,))
+        conn.execute("DELETE FROM client_invites WHERE client_username=? AND panel_key=?",
+                     (client, panel_key))
 
 
-def create_client_invite(client: str) -> str:
+def create_client_invite(client: str, panel_key: str = "") -> str:
     token = secrets.token_urlsafe(24)
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with _lock, _c() as conn:
         conn.execute("DELETE FROM client_invites WHERE expires_at<=?", (int(time.time()),))
         conn.execute(
-            "INSERT INTO client_invites(client_username,token_hash,expires_at) VALUES(?,?,?) "
-            "ON CONFLICT(client_username) DO UPDATE SET token_hash=excluded.token_hash, "
+            "INSERT INTO client_invites(client_username,token_hash,expires_at,panel_key) VALUES(?,?,?,?) "
+            "ON CONFLICT(panel_key,client_username) DO UPDATE SET token_hash=excluded.token_hash, "
             "expires_at=excluded.expires_at, claimed_by=NULL",
-            (client, token_hash, int(time.time()) + 86400),
+            (client, token_hash, int(time.time()) + 86400, panel_key),
         )
     return token
 
 
-def claim_client_invite(token: str, tg_id: int) -> Optional[str]:
+def claim_client_invite(token: str, tg_id: int) -> tuple[str, str] | None:
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with _lock, _c() as conn:
         row = conn.execute(
             "UPDATE client_invites SET claimed_by=? "
             "WHERE token_hash=? AND expires_at>? AND (claimed_by IS NULL OR claimed_by=?) "
-            "RETURNING client_username",
+            "RETURNING panel_key,client_username",
             (tg_id, token_hash, int(time.time()), tg_id),
         ).fetchone()
-    return row["client_username"] if row else None
+    return (row["panel_key"], row["client_username"]) if row else None
 
 
 def release_client_invite(token: str, tg_id: int) -> None:
@@ -228,7 +284,15 @@ def release_client_invite(token: str, tg_id: int) -> None:
 
 def revoke_client_invite(client: str) -> None:
     with _lock, _c() as conn:
-        conn.execute("DELETE FROM client_invites WHERE client_username=?", (client,))
+        conn.execute("DELETE FROM client_invites WHERE client_username=? AND panel_key=''", (client,))
+
+
+def clear_panel_client(panel_key: str, username: str) -> None:
+    with _lock, _c() as conn:
+        conn.execute("UPDATE users SET client_email=NULL,sub_id=NULL,linked_at=NULL,panel_key='' "
+                     "WHERE panel_key=? AND client_email=?", (panel_key, username))
+        conn.execute("DELETE FROM client_invites WHERE panel_key=? AND client_username=?",
+                     (panel_key, username))
 
 
 def private_account(client: str) -> Optional[str]:
@@ -272,14 +336,17 @@ def usernames_map() -> dict[int, str]:
 
 # ---------- requests ----------
 
-def create_request(tg_id: int, tg_username: str | None, type_: str) -> int:
-    with _lock:
-        cur = _c().execute(
-            "INSERT INTO requests(tg_id,tg_username,type,created_at) VALUES(?,?,?,?)",
-            (tg_id, tg_username, type_, int(time.time())),
+def create_request(tg_id: int, tg_username: str | None, type_: str) -> int | None:
+    with _lock, _c() as conn:
+        owner = conn.execute("SELECT panel_key FROM users WHERE tg_id=? AND client_email IS NOT NULL AND client_email<>''",
+                             (tg_id,)).fetchone()
+        cur = conn.execute(
+            "INSERT INTO requests(tg_id,tg_username,type,created_at,panel_key) SELECT ?,?,?,?,? "
+            "WHERE NOT EXISTS (SELECT 1 FROM requests WHERE tg_id=? "
+            "AND status IN ('pending','processing'))",
+            (tg_id, tg_username, type_, int(time.time()), owner["panel_key"] if owner else None, tg_id),
         )
-        _c().commit()
-        return cur.lastrowid
+        return cur.lastrowid if cur.rowcount else None
 
 
 def get_request(req_id: int) -> Optional[sqlite3.Row]:
@@ -294,12 +361,29 @@ def pending_requests() -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def has_pending_request(tg_id: int) -> bool:
+def request_renewal(req_id: int) -> Optional[sqlite3.Row]:
     with _lock:
-        row = _c().execute(
-            "SELECT 1 FROM requests WHERE tg_id=? AND status='pending' LIMIT 1", (tg_id,)
+        return _c().execute(
+            "SELECT * FROM request_renewals WHERE request_id=?", (req_id,),
         ).fetchone()
-    return row is not None
+
+
+def save_request_renewal(req_id: int, username: str | None, expires_at: int | None,
+                         traffic_gb: int | None) -> sqlite3.Row:
+    with _lock, _c() as conn:
+        conn.execute(
+            "INSERT INTO request_renewals(request_id,client_username,expires_at,traffic_gb) "
+            "VALUES(?,?,?,?) ON CONFLICT(request_id) DO NOTHING",
+            (req_id, username, expires_at, traffic_gb),
+        )
+        return conn.execute(
+            "SELECT * FROM request_renewals WHERE request_id=?", (req_id,),
+        ).fetchone()
+
+
+def mark_renewal_plan_applied(req_id: int) -> None:
+    with _lock, _c() as conn:
+        conn.execute("UPDATE request_renewals SET plan_applied=1 WHERE request_id=?", (req_id,))
 
 
 def decide_request(req_id: int, status: str, admin_id: int) -> None:
@@ -311,7 +395,7 @@ def decide_request(req_id: int, status: str, admin_id: int) -> None:
         _c().commit()
 
 
-def claim_request(req_id: int) -> bool:
+def claim_request(req_id: int, *, panel_key: str = "", inbound_id: int | None = None) -> bool:
     """Атомарно переводит заявку pending -> processing. True, если забрали
     именно мы — иначе кто-то (второй тап, второй админ) уже её обрабатывает.
     Нужно перед любым await к панели: без этого проверка status=='pending' и
@@ -319,8 +403,11 @@ def claim_request(req_id: int) -> bool:
     дважды (двойная выдача/продление)."""
     with _lock:
         cur = _c().execute(
-            "UPDATE requests SET status='processing' WHERE id=? AND status='pending'",
-            (req_id,),
+            "UPDATE requests SET status='processing', replay_safe=CASE WHEN ?<>'' THEN 1 ELSE replay_safe END, "
+            "panel_key=COALESCE(panel_key,?), inbound_id=COALESCE(inbound_id,?) "
+            "WHERE id=? AND status='pending' AND (panel_key IS NULL OR panel_key=?) "
+            "AND (inbound_id IS NULL OR inbound_id=?)",
+            (panel_key, panel_key, inbound_id, req_id, panel_key, inbound_id),
         )
         _c().commit()
         return cur.rowcount > 0
