@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -95,6 +97,70 @@ class Config:
     xui_password: str = os.getenv("XUI_PASSWORD", "")
     xui_2fa_secret: str = os.getenv("XUI_2FA_SECRET", "")
 
+    xui_managed_panels: str = field(default_factory=lambda: os.getenv("XUI_MANAGED_PANELS", ""))
+
+    def managed_xui(self) -> dict[str, tuple[str, str, str, str, str, str]]:
+        """Return panel id → (name, HTTPS URL, bearer token, exit client, subscription URL template)."""
+        if not self.xui_managed_panels.strip():
+            return {}
+        try:
+            rows = json.loads(self.xui_managed_panels)
+        except ValueError:
+            raise RuntimeError("XUI_MANAGED_PANELS должен быть JSON-объектом.") from None
+        if not isinstance(rows, dict):
+            raise RuntimeError("XUI_MANAGED_PANELS должен быть JSON-объектом.")
+        panels = {}
+        for key, row in rows.items():
+            if not re.fullmatch(r"[a-z0-9_-]{1,12}", key) or not isinstance(row, dict):
+                raise RuntimeError("Неверный идентификатор или параметры панели 3x-ui.")
+            name, base, token_env = (row.get(k) for k in ("name", "url", "token_env"))
+            if not all(isinstance(v, str) and v.strip() for v in (name, base, token_env)):
+                raise RuntimeError(f"Для панели {key} нужны name, url и token_env.")
+            try:
+                url = urlsplit(base)
+                valid_port = url.port is None or 0 < url.port <= 65535
+            except ValueError:
+                valid_port = False
+            if (not valid_port or url.scheme != "https" or not url.hostname
+                    or url.username is not None or url.query or url.fragment
+                    or len(name) > 60 or not re.fullmatch(r"XUI_[A-Z0-9_]+_TOKEN", token_env)):
+                raise RuntimeError(f"Некорректные параметры панели {key}.")
+            token = os.getenv(token_env, "").strip()
+            if not token:
+                raise RuntimeError(f"Не задан {token_env} для панели {key}.")
+            exit_client = row.get("exit_client", "")
+            if not isinstance(exit_client, str) or len(exit_client) > 128:
+                raise RuntimeError(f"Некорректный exit_client для панели {key}.")
+            subscription = row.get("subscription_url", "")
+            if not isinstance(subscription, str):
+                raise RuntimeError(f"Некорректный subscription_url для панели {key}.")
+            if subscription:
+                try:
+                    sub = urlsplit(subscription)
+                    sub_port = sub.port or 443
+                except ValueError:
+                    raise RuntimeError(f"Некорректный subscription_url для панели {key}.") from None
+                if (not 0 < sub_port <= 65535 or sub.scheme != "https" or not sub.hostname or sub.username is not None
+                        or sub.query or sub.fragment or not sub.path.endswith("/{subId}")
+                        or subscription.count("{subId}") != 1):
+                    raise RuntimeError(f"subscription_url панели {key} должен оканчиваться на /{{subId}}.")
+            node_token_env = row.get("node_token_env", "")
+            if not isinstance(node_token_env, str) or (
+                node_token_env and not re.fullmatch(r"XUI_[A-Z0-9_]+_TOKEN", node_token_env)
+            ):
+                raise RuntimeError(f"Некорректный node_token_env для панели {key}.")
+            node_token = os.getenv(node_token_env, "").strip() if node_token_env else ""
+            if node_token_env and (not node_token or node_token == token):
+                raise RuntimeError(f"Панели {key} нужен отдельный токен для связи нод.")
+            panels[key] = (name, base.rstrip("/"), token, exit_client, subscription, node_token)
+        if len({url for _, url, _, _, _, _ in panels.values()}) != len(panels):
+            raise RuntimeError("Адреса панелей в XUI_MANAGED_PANELS должны быть уникальны.")
+        urls = [urlsplit(sub) for _, _, _, _, sub, _ in panels.values() if sub]
+        routes = {(url.hostname, url.port or 443, url.path) for url in urls}
+        if len(routes) != len(urls):
+            raise RuntimeError("Шаблоны подписки именованных панелей должны быть уникальны.")
+        return panels
+
     # План подписки
     plan_days: int = _safe_int(os.getenv("PLAN_DAYS", "30"), 30)
     plan_traffic_gb: int = _safe_int(os.getenv("PLAN_TRAFFIC_GB", "150"), 150)
@@ -161,7 +227,6 @@ class Config:
             raise RuntimeError(f"Не заданы обязательные переменные .env: {', '.join(missing)}")
 
         if self.private_marzban_url:
-            from urllib.parse import urlsplit
             url = urlsplit(self.private_marzban_url)
             shared = urlsplit(self.marzban_url)
             if (url.scheme != "https" or not url.hostname or url.username is not None
@@ -171,6 +236,8 @@ class Config:
                     and self.private_marzban_inbound):
                 raise RuntimeError("Для отдельной панели нужны PRIVATE_MARZBAN_USERNAME, "
                                    "PRIVATE_MARZBAN_PASSWORD и PRIVATE_MARZBAN_INBOUND.")
+
+        self.managed_xui()
 
         # Бэкап опционален — не валим старт, но предупреждаем о неполной настройке.
         if self.backup_enabled and not (self.r2_endpoint and self.r2_bucket

@@ -12,6 +12,7 @@ import html
 import ipaddress
 import logging
 import subprocess
+import time
 from uuid import uuid4
 
 import aiohttp
@@ -21,7 +22,7 @@ from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import db, happ_routing, keyboards as kb, node_provision, reality_admin, reality_scan, ssh_ops, texts, warp, warp_admin
 from ..config import config
@@ -41,7 +42,9 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          xray_channel_pick_kb, xray_upgrade_confirm_kb)
 from ..panels.base import Client, PanelError
 from ..panels.multi import MultiPanel
-from ..runtime import get_bot, get_panel
+from ..panels.ownership import (PanelOwnerConflict, create_named_client, ensure_panel_owner,
+                                issuance_inbounds, owner_key, subscription_targets)
+from ..runtime import get_bot, get_panel, panel_for
 from .common import BindingConflict, bind_client, binding_lock, get_traffic_gb
 
 log = logging.getLogger("admin")
@@ -152,7 +155,8 @@ async def adm_start(message: Message, state: FSMContext, command: CommandObject)
     await state.clear()
     await message.answer(
         "🛠 <b>Админ-панель</b>\nВыберите действие на клавиатуре ниже.",
-        reply_markup=admin_kb(_add_server_available(), _servers_available(), _servers_available()),
+        reply_markup=admin_kb(_add_server_available(), _servers_available(), _servers_available(),
+                              show_xui=True),
     )
 
 
@@ -165,7 +169,8 @@ async def cmd_help(message: Message) -> None:
         "/requisites &lt;текст&gt; — реквизиты\n"
         "/grant &lt;tg_id&gt; — выдать вручную\n"
         "/broadcast &lt;текст&gt; — рассылка\n",
-        reply_markup=admin_kb(_add_server_available(), _servers_available(), _servers_available()),
+        reply_markup=admin_kb(_add_server_available(), _servers_available(), _servers_available(),
+                              show_xui=True),
     )
 
 
@@ -185,17 +190,22 @@ async def kb_requests(message: Message, state: FSMContext) -> None:
     for r in reqs:
         uname = r["tg_username"] or umap.get(r["tg_id"]) or f"id {r['tg_id']}"
         label = "🆕 Новая подписка" if r["type"] == "new" else "🔁 Продление"
+        target = subscription_targets().get(r["panel_key"])
+        selected = f"Панель: {html.escape(target[0])}\n" if target else ""
         await message.answer(
             f"📨 Заявка #{r['id']} — <b>{label}</b>\n"
             f"От: {html.escape(str(uname))} (id <code>{r['tg_id']}</code>)\n"
+            f"{selected}"
             f"Тариф: {config.plan_days} дн., {db.get_setting('price', config.default_price)} ₽",
-            reply_markup=admin_decision(r["id"]),
+            reply_markup=admin_decision(r["id"], allow_reject=db.request_renewal(r["id"]) is None
+                                        and not (r["panel_key"] and r["replay_safe"]),
+                                        choose_panel=bool(subscription_targets()) and r["panel_key"] is None),
         )
 
 
 @router.callback_query(F.data.startswith("adm:"))
 async def cb_decision(cb: CallbackQuery) -> None:
-    _, action, req_id_s = cb.data.split(":")
+    _, action, req_id_s, *params = cb.data.split(":")
     req_id = int(req_id_s)
     req = db.get_request(req_id)
     if not req:
@@ -205,8 +215,83 @@ async def cb_decision(cb: CallbackQuery) -> None:
         await cb.answer(f"Уже обработана: {req['status']}", show_alert=True)
         return
 
+    panel_key = req["panel_key"]
+    inbound = req["inbound_id"]
+    targets = subscription_targets()
+    if action in ("pick", "inbounds"):
+        if panel_key is not None or owner_key(req["tg_id"]) is not None:
+            await cb.answer("Заявка уже закреплена за панелью.", show_alert=True)
+            return
+        if action == "pick":
+            rows = [(name, f"adm:inbounds:{req_id}:{key}") for key, (name, _) in targets.items()]
+            rows.append(("Обычная панель", f"adm:ok:{req_id}"))
+        elif params and params[0] in targets:
+            key = params[0]
+            _, target = targets[key]
+            try:
+                entries = [i for i in await issuance_inbounds(target) if not i.get("excludeFromSub")]
+            except PanelError as e:
+                await cb.answer(str(e), show_alert=True)
+                return
+            rows = [(f"{r.get('remark') or 'VLESS'} · {r['port']}"[:64],
+                     f"adm:choose:{req_id}:{key}:{r['id']}") for r in entries[:30]]
+            if entries:
+                rows.insert(0, ("Авто · первый доступный", f"adm:choose:{req_id}:{key}:0"))
+            rows.append(("← Панели", f"adm:pick:{req_id}"))
+        else:
+            await cb.answer("Панель недоступна.", show_alert=True)
+            return
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=name, callback_data=data)] for name, data in rows
+        ])
+        await cb.message.edit_reply_markup(reply_markup=markup)
+        await cb.answer()
+        return
+    if action == "choose":
+        if len(params) != 2 or params[0] not in targets or not params[1].isdigit():
+            await cb.answer("Выбор больше недоступен.", show_alert=True)
+            return
+        key, number = params
+        if panel_key is not None and (panel_key != key or inbound != int(number)):
+            await cb.answer("Заявка уже закреплена за другой целью.", show_alert=True)
+            return
+        panel_key, inbound = key, int(number)
+        try:
+            await ensure_panel_owner(req["tg_id"], key)
+        except (PanelError, OSError, TimeoutError) as exc:
+            log.warning("Не удалось проверить принадлежность заявки %s: %s", req_id, type(exc).__name__)
+            await cb.answer(str(exc) if isinstance(exc, PanelOwnerConflict)
+                            else "Не удалось проверить подписку. Повторите позже.", show_alert=True)
+            return
+        if not inbound:
+            try:
+                _, target = targets[key]
+                available = [row for row in await issuance_inbounds(target) if not row.get("excludeFromSub")]
+            except PanelError as e:
+                await cb.answer(str(e), show_alert=True)
+                return
+            if not available:
+                await cb.answer("На панели нет доступных входов.", show_alert=True)
+                return
+            inbound = available[0]["id"]
+    elif action not in ("ok", "no"):
+        await cb.answer()
+        return
+    owned = owner_key(req["tg_id"])
+    if owned is not None:
+        if panel_key is not None and owned != panel_key and action != "no":
+            await cb.answer("Привязка клиента изменилась. Проверьте заявку.", show_alert=True)
+            return
+        if panel_key is None:
+            panel_key = owned
+    panel_key = panel_key or ""
+
     if action == "no":
-        if not db.claim_request(req_id):
+        if db.request_renewal(req_id) is not None or (panel_key and req["replay_safe"]):
+            await cb.answer("Операция уже начата. Подтвердите заявку ещё раз, чтобы завершить.",
+                            show_alert=True)
+            return
+        if not db.claim_request(req_id, panel_key=panel_key, inbound_id=inbound):
             await cb.answer("Уже обработана кем-то другим", show_alert=True)
             return
         db.decide_request(req_id, "rejected", cb.from_user.id)
@@ -219,62 +304,97 @@ async def cb_decision(cb: CallbackQuery) -> None:
     # окно между проверкой status=='pending' выше и записью решения ниже
     # (внутри которого ждём панель) позволяет одобрить одну заявку дважды
     # при двойном тапе/двух админах — и клиент получает двойную выдачу.
-    if not db.claim_request(req_id):
+    if not db.claim_request(req_id, panel_key=panel_key, inbound_id=inbound):
         await cb.answer("Уже обработана кем-то другим", show_alert=True)
         return
 
+    req = db.get_request(req_id)
     try:
         if req["type"] == "new":
-            await _approve_new(req)
+            notification, markup = await _approve_new(req)
         else:
-            await _approve_renew(req)
+            notification, markup = await _approve_renew(req)
     except Exception:  # noqa: BLE001
-        # Заявка НАМЕРЕННО возвращается в pending — чтобы можно было повторить
-        # после устранения причины (панель прилегла и т.п.). Чтобы не зависала
-        # молча, явно подсказываем админу про кнопку «Отклонить» (она тоже
-        # снимает processing/pending).
         log.exception("Ошибка подтверждения заявки %s", req_id)
         db.release_request(req_id)
         await cb.answer(
-            "Не удалось подтвердить (панель недоступна?). "
-            "Повторите позже или нажмите «Отклонить».",
+            "Не удалось завершить операцию. Откройте заявку и повторите подтверждение позже.",
             show_alert=True,
         )
         return
 
     db.decide_request(req_id, "approved", cb.from_user.id)
+    await _safe_user_msg(req["tg_id"], notification, reply_markup=markup)
     await cb.message.edit_text(cb.message.html_text + "\n\n✅ <b>Подтверждено</b>")
     await cb.answer("Готово")
 
 
-async def _approve_new(req) -> None:
-    panel = get_panel()
+async def _approve_new(req) -> tuple[str, InlineKeyboardMarkup]:
+    key = req["panel_key"] or ""
+    panel = panel_for(key) if key else get_panel()
     tg_id = req["tg_id"]
     async with binding_lock:
+        await ensure_panel_owner(tg_id, key)
         created = await panel.find_by_tgid(tg_id)
         if not created:
-            created = await _create_client(tg_id)
-        db.upsert_user(tg_id, req["tg_username"], client_email=created.username, sub_id=created.sub_url)
-    await _safe_user_msg(tg_id, texts.new_subscription_issued(config.plan_days, created.all_subs),
-                         reply_markup=setup_start_kb())
+            if key:
+                created = await create_named_client(panel, tg_id, config.plan_days, get_traffic_gb(),
+                                                    req["inbound_id"] or None)
+            else:
+                created = await _create_client(tg_id)
+        if key:
+            db.save_client_binding(tg_id, req["tg_username"], created.username, created.sub_url, key)
+        else:
+            db.upsert_user(tg_id, req["tg_username"], client_email=created.username, sub_id=created.sub_url)
+    return texts.new_subscription_issued(config.plan_days, created.all_subs), setup_start_kb()
 
 
-async def _approve_renew(req) -> None:
-    panel = get_panel()
+async def _approve_renew(req) -> tuple[str, InlineKeyboardMarkup | None]:
+    key = req["panel_key"] or ""
+    if not key:
+        panel = get_panel()
+        async with binding_lock:
+            await ensure_panel_owner(req["tg_id"], key)
+            current = await panel.find_by_tgid(req["tg_id"])
+            if current:
+                renewed = await panel.extend_client(
+                    client=current, add_days=config.plan_days,
+                    set_total_gb=get_traffic_gb(), reset_traffic=True,
+                )
+                days = renewed.days_left
+                return texts.renewed(days if days is not None else config.plan_days), None
+        return await _approve_new(req)
+    panel = panel_for(key)
+    req_id = req["id"]
     tg_id = req["tg_id"]
-    client = await panel.find_by_tgid(tg_id)
-    if not client:
-        # Заявка на продление, но клиента в панели нет (старый/удалённый/поддельный
-        # renew). Не падаем в ошибку (из-за которой заявка вечно висела pending) —
-        # просто выдаём новую подписку.
-        log.info("renew без клиента tg_id=%s → выдаём новую подписку", tg_id)
-        await _approve_new(req)
-        return
-    res = await panel.extend_client(
-        client=client, add_days=config.plan_days,
-        set_total_gb=get_traffic_gb(), reset_traffic=True)   # свежий месяц
-    days = res.days_left
-    await _safe_user_msg(tg_id, texts.renewed(days if days is not None else config.plan_days))
+    async with binding_lock:
+        await ensure_panel_owner(tg_id, key)
+        plan = db.request_renewal(req_id)
+        if plan is None:
+            client = await panel.find_by_tgid(tg_id)
+            if client:
+                expires_at = max(client.expire_ts, int(time.time())) + config.plan_days * 86400
+                plan = db.save_request_renewal(req_id, client.username, expires_at, get_traffic_gb())
+            else:
+                # Запоминаем именно выдачу, чтобы после её выполнения повтор
+                # не счёл нового клиента существующим и не добавил ещё месяц.
+                plan = db.save_request_renewal(req_id, None, None, None)
+        else:
+            client = await panel.find_by_username(plan["client_username"]) if plan["client_username"] else None
+        if plan["client_username"]:
+            if not client or client.username != plan["client_username"] or client.tg_id != tg_id:
+                raise PanelError("Привязка клиента изменилась после начала продления.")
+            if not plan["plan_applied"]:
+                client = await panel.extend_client(client=client, add_days=0,
+                                                   expires_at=plan["expires_at"],
+                                                   set_total_gb=plan["traffic_gb"])
+                db.mark_renewal_plan_applied(req_id)
+            await panel.reset_traffic(client=client)
+            days = client.days_left
+            return texts.renewed(days if days is not None else config.plan_days), None
+
+    # У клиента без подписки заявка на продление оформляет новый доступ.
+    return await _approve_new(req)
 
 
 # =====================================================================
@@ -803,7 +923,7 @@ async def kb_grant(message: Message, state: FSMContext) -> None:
     await message.answer(
         "➕ Введите <b>Telegram ID</b>, чтобы выдать или продлить подписку. "
         "Если ID неизвестен, создайте подписку с приглашением.",
-        reply_markup=kb.grant_without_id_kb() if message.chat.type == "private" else None,
+        reply_markup=kb.grant_without_id_kb(show_xui=bool(subscription_targets())) if message.chat.type == "private" else None,
     )
 
 
@@ -859,18 +979,20 @@ async def cb_grant_noid(cb: CallbackQuery, state: FSMContext) -> None:
 
 
 async def _do_grant(tg_id: int) -> str:
-    panel = get_panel()
     user = db.get_user(tg_id)
     uname = user["tg_username"] if user else None
     try:
         async with binding_lock:
+            key = owner_key(tg_id)
+            panel = panel_for(key) if key else get_panel()
             existing = await panel.find_by_tgid(tg_id)
             if existing:
                 cl = await panel.extend_client(
                     client=existing, add_days=config.plan_days,
                     set_total_gb=get_traffic_gb(), reset_traffic=True)
             else:
-                cl = await _create_client(tg_id)
+                cl = (await create_named_client(panel, tg_id, config.plan_days, get_traffic_gb(), None)
+                      if key else await _create_client(tg_id))
             db.upsert_user(tg_id, uname, client_email=cl.username, sub_id=cl.sub_url)
         if existing:
             await _safe_user_msg(tg_id, texts.renewed(config.plan_days))

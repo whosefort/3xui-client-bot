@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir "pyrage>=1.1,<2" \
     || echo "ВНИМАНИЕ: pyrage не установлен — бэкап будет без age-шифрования"
 
 COPY bot/ ./bot/
+COPY xui/bootstrap_managed.sh ./xui/bootstrap_managed.sh
 # Только пин-файлы версий и сам апгрейд-скрипт (не весь node/) — «Добавить
 # сервер» отдаёт новым нодам те же проверенные версии, что и node/bootstrap.sh
 # на месте, а «Обновить xray на нодах» (bot/ssh_ops.py) гоняет ИМЕННО этот

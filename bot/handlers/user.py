@@ -13,10 +13,12 @@ from aiogram.types import CallbackQuery, Message
 
 from .. import db, texts
 from ..config import config
-from ..keyboards import (back_to_menu, bind_ok_kb, confirm_paid, faq_answer_kb,
+from ..keyboards import (admin_decision, back_to_menu, bind_ok_kb, confirm_paid, faq_answer_kb,
                         faq_kb, main_menu, setup_done_kb, setup_step1_kb,
                         setup_step2_kb, setup_step3_kb, status_kb, sub_fallback_kb)
-from ..runtime import get_panel
+from ..panels.base import PanelError
+from ..panels.ownership import locate_subscription, subscription_targets
+from ..runtime import get_panel, panel_for
 from .common import (BindingConflict, bind_client, binding_lock, get_price,
                      get_requisites, notify_admins, resolve_client)
 
@@ -163,26 +165,25 @@ async def cb_buy_or_renew(cb: CallbackQuery) -> None:
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("paid:"))
+@router.callback_query(F.data.in_({"paid:buy", "paid:renew"}))
 async def cb_paid(cb: CallbackQuery) -> None:
     kind = cb.data.split(":", 1)[1]  # buy | renew
     tg_id = cb.from_user.id
 
-    if db.has_pending_request(tg_id):
+    req_type = "new" if kind == "buy" else "renew"
+    req_id = db.create_request(tg_id, _uname(cb), req_type)
+    if req_id is None:
         await cb.answer("У вас уже есть заявка в обработке", show_alert=True)
         return
 
-    req_type = "new" if kind == "buy" else "renew"
-    req_id = db.create_request(tg_id, _uname(cb), req_type)
-
     uname = html.escape(_uname(cb) or str(tg_id))
     label = "НОВАЯ подписка" if req_type == "new" else "ПРОДЛЕНИЕ"
-    from ..keyboards import admin_decision
     await notify_admins(
         f"📨 Заявка #{req_id} — <b>{label}</b>\n"
         f"От: {uname} (id <code>{tg_id}</code>)\n"
         f"Тариф: {config.plan_days} дн., {get_price()} ₽",
-        reply_markup=admin_decision(req_id),
+        reply_markup=admin_decision(req_id, choose_panel=bool(subscription_targets())
+                                    and db.get_request(req_id)["panel_key"] is None),
     )
     await cb.message.edit_text(texts.request_sent(), reply_markup=back_to_menu())
     await cb.answer()
@@ -205,11 +206,15 @@ async def _claim_invite(message: Message, token: str) -> None:
         await message.answer("Приглашение недействительно.")
         return
     tg_id = message.from_user.id
-    panel = get_panel()
     try:
         async with binding_lock:
-            username = db.claim_client_invite(token, tg_id)
-            client = await panel.find_by_username(username) if username else None
+            claimed = db.claim_client_invite(token, tg_id)
+            if not claimed:
+                await message.answer("Приглашение недействительно или уже использовано.")
+                return
+            key, username = claimed
+            panel = panel_for(key) if key else get_panel()
+            client = await panel.find_by_username(username)
             if not client:
                 await message.answer("Приглашение недействительно или уже использовано.")
                 return
@@ -228,14 +233,20 @@ async def _claim_invite(message: Message, token: str) -> None:
 @router.message(Bind.waiting, F.text)
 async def bind_input(message: Message, state: FSMContext) -> None:
     await state.clear()
-    panel = get_panel()
     me = message.from_user.id
     sub_id = _extract_subid(message.text)
     if not sub_id:
         await message.answer(texts.bind_bad_input(), reply_markup=back_to_menu())
         return
     async with binding_lock:
-        client = await panel.find_by_subid(sub_id)
+        try:
+            panel, client = await locate_subscription(message.text or "", sub_id)
+        except (PanelError, OSError, TimeoutError, ValueError):
+            log.warning("Не удалось связаться с панелью при проверке подписки")
+            await state.set_state(Bind.waiting)
+            await message.answer("Не удалось проверить подписку. Пришлите ту же ссылку чуть позже.",
+                                 reply_markup=back_to_menu())
+            return
         if not client:
             await message.answer(texts.bind_not_found(), reply_markup=back_to_menu())
             return
@@ -252,6 +263,11 @@ async def bind_input(message: Message, state: FSMContext) -> None:
             await bind_client(panel, client, me, _uname(message))
         except BindingConflict as exc:
             await message.answer(str(exc), reply_markup=back_to_menu())
+            return
+        except (PanelError, OSError, TimeoutError):
+            await state.set_state(Bind.waiting)
+            await message.answer("Не удалось привязать подписку. Пришлите ту же ссылку чуть позже.",
+                                 reply_markup=back_to_menu())
             return
     await message.answer(texts.bind_ok(), reply_markup=bind_ok_kb())
     await notify_admins(

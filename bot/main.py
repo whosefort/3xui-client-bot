@@ -12,7 +12,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from . import db, happ_routing, http_api, runtime
 from .config import config
 from .handlers import setup_routers
-from .panels import build_panel
+from .panels import build_panel, build_xui_management
+from .panels import xui_registry
 from .scheduler import setup_scheduler
 
 logging.basicConfig(
@@ -37,6 +38,8 @@ async def main() -> None:
         log.warning("Happ routing-профиль не выложен: %s", e)
 
     runtime.panel = build_panel()
+    runtime.xui_panels = build_xui_management()
+    xui_registry.load(runtime.xui_panels)
     log.info("Бэкенд панели: %s", config.panel_backend)
 
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -66,6 +69,7 @@ async def main() -> None:
             await http_runner.cleanup()
         sched.shutdown(wait=False)
         await runtime.panel.close()
+        await asyncio.gather(*(p.close() for _, p in runtime.xui_panels.values()))
         await bot.session.close()
 
 
