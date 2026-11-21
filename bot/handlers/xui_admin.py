@@ -8,6 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 from collections.abc import Iterable
+from urllib.parse import urlsplit
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -18,7 +19,9 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .. import db, runtime
 from ..config import config
 from ..keyboards import ADM_XUI
+from ..panels import xui_bootstrap, xui_registry
 from ..panels.base import PanelError
+from ..panels.xui_infra import add_reality_preset
 from ..panels.ownership import create_named_client, ensure_panel_owner, subscription_targets
 from ..panels.xui import XUIClient
 from ..panels.xui_routes import client_route, exit_outbound, outbound_tags, set_client_route
@@ -42,6 +45,9 @@ class XUIInput(StatesGroup):
     create = State()
     bind = State()
     hwid_limit = State()
+    register = State()
+    address = State()
+    bootstrap = State()
 
 
 def _key(text: str) -> str:
@@ -86,16 +92,14 @@ async def _show(message: Message, text: str, rows: Iterable[tuple[str, str]]) ->
 
 
 def _panel_rows() -> list[tuple[str, str]]:
-    return [(name, f"p:{key}:0") for key, (name, _) in runtime.xui_panels.items()]
+    return ([(name, f"p:{key}:0") for key, (name, _) in runtime.xui_panels.items()]
+            + [("Подключить готовую панель", "register"), ("Настроить чистый VPS", "bootstrap")])
 
 
 @router.message(Command("xui"))
 @router.message(F.text == ADM_XUI)
 async def show_panels(message: Message, state: FSMContext) -> None:
     await state.clear()
-    if not runtime.xui_panels:
-        await message.answer("Панели 3x-ui пока не подключены.")
-        return
     await message.answer("🖥 <b>Панели 3x-ui</b>", reply_markup=_keyboard(_panel_rows()))
 
 
@@ -113,7 +117,8 @@ async def _show_panel(message: Message, key: str, page: int) -> None:
         rows.append(("Следующие входы →", f"p:{key}:{start // PAGE_SIZE + 1}"))
     rows += [("Ноды", f"xi:nodes:{key}"), ("Исходящие и тесты", f"xi:out:{key}"),
              ("➕ Вход по пресету", f"xi:presets:{key}:in"),
-             ("Резервная копия", f"xi:backup:{key}"), ("← Панели", "home")]
+             ("Адрес панели", f"addr:{key}"), ("Резервная копия", f"xi:backup:{key}"),
+             ("← Панели", "home")]
     await _show(message, f"<b>{html.escape(name)}</b>\nXray {html.escape(str(xray.get('version') or ''))}"
                 f" · {html.escape(str(xray.get('state') or 'неизвестно'))}\n"
                 f"Входов: {len(inbounds)}", rows)
@@ -222,8 +227,39 @@ async def manage(query: CallbackQuery, state: FSMContext) -> None:
             await state.clear()
             await _show(message, "🖥 <b>Панели 3x-ui</b>", _panel_rows())
             return
+        if action == "register":
+            await state.set_state(XUIInput.register)
+            await message.answer(
+                "Пришлите пять строк: идентификатор панели, название, HTTPS-адрес панели, "
+                "HTTPS-шаблон подписки с /{subId} в конце и имя переменной XUI_…_TOKEN. "
+                "Токен задайте в окружении бота. Отмена — /cancel."
+            )
+            return
+        if action == "bootstrap":
+            await state.set_state(XUIInput.bootstrap)
+            await message.answer(
+                "Пришлите в одной строке идентификатор, IPv4, SSH-порт и DNS-имя "
+                "чистого VPS на Debian/Ubuntu. Например <code>newnode 203.0.113.10 22 "
+                "vpn.example.org</code>. VPS должен принимать SSH-ключ установщика. "
+                "Бот установит 3x-ui, создаст VLESS-вход и одноразовое приглашение. "
+                "Отмена — /cancel."
+            )
+            return
         key, *args = args
         name, panel = _panel(key)
+        if action == "addr":
+            url = urlsplit(panel.base)
+            address = url._replace(netloc=url.netloc.rsplit("@", 1)[-1], query="", fragment="").geturl()
+            await _show(message, f"<b>{html.escape(name)} · Адрес панели</b>\n"
+                        f"<code>{html.escape(address)}</code>", [("Сменить адрес в боте", f"setaddr:{key}"),
+                                                               ("← Панель", f"p:{key}:0")])
+            return
+        if action == "setaddr":
+            await state.set_state(XUIInput.address)
+            await state.update_data(xui_key=key)
+            await message.answer("Пришлите новый HTTPS-адрес этой же панели. "
+                                 "Пока старый адрес работает, бот сверит список подписок. Отмена — /cancel.")
+            return
         if action == "p":
             await _show_panel(message, key, int(args[0]))
             return
@@ -400,6 +436,9 @@ async def manage(query: CallbackQuery, state: FSMContext) -> None:
         await message.answer("Откройте /xui и повторите операцию.")
 
 
+@router.message(XUIInput.bootstrap, Command("cancel"))
+@router.message(XUIInput.address, Command("cancel"))
+@router.message(XUIInput.register, Command("cancel"))
 @router.message(XUIInput.create, Command("cancel"))
 @router.message(XUIInput.bind, Command("cancel"))
 @router.message(XUIInput.hwid_limit, Command("cancel"))
@@ -483,3 +522,71 @@ async def hwid_limit_input(message: Message, state: FSMContext) -> None:
                              reply_markup=_keyboard([("Устройства и HWID", f"hw:{group}")]))
     except PanelError as e:
         await message.answer(html.escape(str(e)))
+
+
+@router.message(XUIInput.register, F.text)
+async def register_panel(message: Message, state: FSMContext) -> None:
+    values = message.text.strip().splitlines()
+    if len(values) != 5:
+        await message.answer("Нужно пять строк. Для отмены отправьте /cancel.")
+        return
+    key, name, url, subscription, token_env = (value.strip() for value in values)
+    try:
+        await xui_registry.register(key, name, url, subscription, token_env)
+    except PanelError as exc:
+        await message.answer(html.escape(str(exc)))
+        return
+    await state.clear()
+    await message.answer("Панель подключена. Выберите существующий инбаунд или создайте вход по пресету.",
+                         reply_markup=_keyboard([("Открыть панель", f"p:{key}:0")]))
+
+
+@router.message(XUIInput.address, F.text)
+async def update_panel_address(message: Message, state: FSMContext) -> None:
+    key = (await state.get_data()).get("xui_key")
+    if not key:
+        await state.clear()
+        return
+    try:
+        async with binding_lock:
+            await xui_registry.change_address(key, message.text.strip())
+    except PanelError as exc:
+        await message.answer(html.escape(str(exc)))
+        return
+    await state.clear()
+    await message.answer("Новый адрес сохранён, привязки и ссылки подписок сохранены.",
+                         reply_markup=_keyboard([("Адрес панели", f"addr:{key}")]))
+
+
+@router.message(XUIInput.bootstrap, F.text)
+async def bootstrap_panel(message: Message, state: FSMContext) -> None:
+    values = message.text.split()
+    if len(values) != 4 or not values[2].isascii() or not values[2].isdigit() or len(values[2]) > 5:
+        await message.answer("Укажите идентификатор, IPv4, SSH-порт и DNS-имя. Отмена — /cancel.")
+        return
+    key, host, port, domain = values
+    # Receive the bot username before creating an invitation on the VPS.
+    bot_name = (await runtime.get_bot().me()).username
+    await state.clear()
+    await message.answer("Проверяю VPS и запускаю установку. Это может занять несколько минут.")
+    try:
+        await xui_bootstrap.setup(key, host, int(port), domain)
+        panel = runtime.panel_for(key)
+        inbound = await add_reality_preset(panel, "auto", listen_port=24443)
+        async with binding_lock, panel.config_lock:
+            client = await create_named_client(panel, 0, config.plan_days, get_traffic_gb(), inbound["id"],
+                                               username="client_" + uuid4().hex[:24])
+            try:
+                await xui_bootstrap.verify_subscription(client.sub_url, inbound["port"])
+                token = db.create_client_invite(client.username, key)
+            except Exception:
+                await panel.delete_client(client.username)
+                raise
+    except PanelError as exc:
+        markup = _keyboard([("Открыть панель", f"p:{key}:0")]) if key in runtime.xui_panels else None
+        await message.answer(html.escape(str(exc)), reply_markup=markup)
+        return
+    await message.answer(f"Панель подключена, вход слушает порт {inbound['port']}.\n"
+                         f"Одноразовое приглашение на 24 часа\n"
+                         f"<code>https://t.me/{bot_name}?start=claim_{token}</code>",
+                         reply_markup=_keyboard([("Открыть панель", f"p:{key}:0")]))

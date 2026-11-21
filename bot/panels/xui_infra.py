@@ -144,7 +144,7 @@ async def pick_reality_target(panel: XUIClient, preset: str) -> str:
     return host
 
 
-async def add_reality_preset(panel: XUIClient, preset: str) -> dict:
+async def add_reality_preset(panel: XUIClient, preset: str, *, listen_port: int | None = None) -> dict:
     async with panel.config_lock:
         existing = await panel.list_inbounds()
         label = "VLESS REALITY · " + preset
@@ -153,10 +153,13 @@ async def add_reality_preset(panel: XUIClient, preset: str) -> dict:
             stream = previous.get("streamSettings", {})
             if previous.get("protocol") != "vless" or stream.get("security") != "reality":
                 raise PanelError("Название пресета уже занято другим входом.")
+            if listen_port is not None and previous.get("port") != listen_port:
+                raise PanelError("Пресет уже создан на другом порту.")
             return previous
         host = await pick_reality_target(panel, preset)
         used = {row.get("port") for row in existing}
-        port = next((n for n in range(24443, 24463) if n not in used), None)
+        ports = (listen_port,) if listen_port is not None else range(24443, 24463)
+        port = next((n for n in ports if n not in used), None)
         if port is None:
             raise PanelError("В пуле пресетов нет свободных портов.")
         keys = panel._object((await panel._request("GET", "/panel/api/server/getNewX25519Cert")).get("obj"))

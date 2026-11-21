@@ -156,7 +156,7 @@ async def adm_start(message: Message, state: FSMContext, command: CommandObject)
     await message.answer(
         "🛠 <b>Админ-панель</b>\nВыберите действие на клавиатуре ниже.",
         reply_markup=admin_kb(_add_server_available(), _servers_available(), _servers_available(),
-                              show_xui=bool(config.xui_managed_panels or config.uses("xui"))),
+                              show_xui=True),
     )
 
 
@@ -170,7 +170,7 @@ async def cmd_help(message: Message) -> None:
         "/grant &lt;tg_id&gt; — выдать вручную\n"
         "/broadcast &lt;текст&gt; — рассылка\n",
         reply_markup=admin_kb(_add_server_available(), _servers_available(), _servers_available(),
-                              show_xui=bool(config.xui_managed_panels or config.uses("xui"))),
+                              show_xui=True),
     )
 
 
