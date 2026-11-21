@@ -7,11 +7,13 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import backup, db, runtime
 from ..config import config
 from ..panels.base import PanelError
+from ..panels.xui_routes import outbound_tags, set_client_route
 from ..panels import xui_infra as infra
 
 router = Router(name="xui_infra")
@@ -56,7 +58,7 @@ async def _node(message: Message, key: str, node: dict) -> None:
 
 
 @router.callback_query(F.data.startswith("xi:"))
-async def infrastructure(query: CallbackQuery) -> None:
+async def infrastructure(query: CallbackQuery, state: FSMContext) -> None:
     if not isinstance(query.message, Message):
         await query.answer()
         return
@@ -146,11 +148,91 @@ async def infrastructure(query: CallbackQuery) -> None:
         elif action == "out":
             template, _ = await panel.xray_template()
             outs = template.get("outbounds", [])
-            rows = [(f"{o['tag']} · {o.get('protocol')}", f"xi:test:{key}:{_key(o['tag'])}")
-                    for o in outs[:35] if o.get("tag") and o.get("protocol") not in ("blackhole", "dns")]
+            rows = [(f"{o['tag']} · {o.get('protocol')}", f"xi:outinfo:{key}:{_key(o['tag'])}")
+                    for o in outs[:35] if o.get("tag")]
             rows += [("➕ Пресеты выхода", f"xi:presets:{key}:out"), back]
             await _screen(message, f"<b>{title} · Исходящие</b>\n"
-                          "Выберите выход для HTTP-проверки с сервера.", rows)
+                          "Откройте выход, чтобы проверить его и посмотреть назначения.", rows)
+        elif action in ("outinfo", "outdel", "outconfirm"):
+            template, _ = await panel.xray_template()
+            matches = [o for o in template.get("outbounds", []) if o.get("tag") and _key(o["tag"]) == args[0]]
+            if len(matches) != 1:
+                raise PanelError("Выход изменился. Откройте список заново.")
+            outbound = matches[0]
+            tag = outbound["tag"]
+            outbound_back = ("← Исходящие", f"xi:out:{key}")
+            if action == "outconfirm":
+                await infra.remove_unused_outbound(panel, tag)
+                await _screen(message, "Выход удалён.", [outbound_back])
+                return
+            if action == "outdel":
+                await _screen(message, f"Удалить <b>{html.escape(tag)}</b>? Xray кратковременно перезапустится.",
+                              [("Подтвердить", f"xi:outconfirm:{key}:{args[0]}"), outbound_back])
+                return
+            rules = infra.outbound_assignments(template, tag)
+            assigned = []
+            for rule in rules[:12]:
+                subjects = ", ".join(str(x) for x in (rule.get("user") or rule.get("inboundTag") or []))
+                assigned.append("• " + html.escape(subjects[:100] or "Общее правило"))
+            rows = []
+            if tag in outbound_tags(template):
+                rows.append(("Назначить клиенту", f"xi:outpick:{key}:{args[0]}"))
+            if outbound.get("protocol") not in ("blackhole", "dns"):
+                rows.insert(0, ("Проверить HTTP", f"xi:test:{key}:{args[0]}"))
+            if not rules and template.get("outbounds", [])[0]["tag"] != tag:
+                rows.append(("Удалить неиспользуемый выход", f"xi:outdel:{key}:{args[0]}"))
+            await _screen(message, f"<b>{html.escape(tag)}</b>\nПравил: {len(rules)}\n" +
+                          "\n".join(assigned), [*rows, outbound_back])
+        elif action == "outpick":
+            template, _ = await panel.xray_template()
+            matches = [tag for tag in outbound_tags(template) if _key(tag) == args[0]]
+            if len(matches) != 1:
+                raise PanelError("Выход изменился. Откройте список заново.")
+            await state.update_data(xui_outbound=[message.message_id, key, matches[0]],
+                                    xui_outbound_confirm=None)
+            inbounds = await panel.list_inbounds()
+            rows = [(f"{row.get('remark') or row['tag']} · {row['port']}", f"xi:outusers:{key}:{row['id']}:0")
+                    for row in inbounds if row.get("tag") and row["settings"].get("clients")]
+            await _screen(message, f"Выберите вход для назначения <b>{html.escape(matches[0])}</b>.",
+                          [*rows[:35], ("← Выход", f"xi:outinfo:{key}:{args[0]}")])
+        elif action in ("outusers", "outuser", "outapply"):
+            context = (await state.get_data()).get("xui_outbound")
+            if not context or context[:2] != [message.message_id, key]:
+                raise PanelError("Выбор выхода устарел. Откройте карточку выхода заново.")
+            tag = context[2]
+            inbound_id = int(args[0])
+            inbound = next((row for row in await panel.list_inbounds() if row["id"] == inbound_id), None)
+            if inbound is None:
+                raise PanelError("Вход больше не существует.")
+            emails = [client["email"] for client in inbound["settings"].get("clients", []) if client.get("email")]
+            back = ("← Входы", f"xi:outpick:{key}:{_key(tag)}")
+            if action == "outusers":
+                page = min(max(0, int(args[1])), max(0, (len(emails) - 1) // 15))
+                rows = [(email, f"xi:outuser:{key}:{inbound_id}:{_key(email)}")
+                        for email in emails[page * 15:(page + 1) * 15]]
+                if page:
+                    rows.append(("← Предыдущие", f"xi:outusers:{key}:{inbound_id}:{page - 1}"))
+                if (page + 1) * 15 < len(emails):
+                    rows.append(("Следующие →", f"xi:outusers:{key}:{inbound_id}:{page + 1}"))
+                await _screen(message, f"Выберите клиента для <b>{html.escape(tag)}</b>.", [*rows, back])
+                return
+            matches = [email for email in emails if _key(email) == args[1]]
+            if len(matches) != 1:
+                raise PanelError("Клиент больше не привязан к этому входу.")
+            email = matches[0]
+            confirmation = [message.message_id, key, tag, inbound_id, email]
+            if action == "outuser":
+                await state.update_data(xui_outbound_confirm=confirmation)
+                await _screen(message, f"Назначить <b>{html.escape(tag)}</b> клиенту "
+                              f"<b>{html.escape(email)}</b>? Xray кратковременно перезапустится.",
+                              [("Подтвердить", f"xi:outapply:{key}:{inbound_id}:{args[1]}"), back])
+                return
+            if (await state.get_data()).get("xui_outbound_confirm") != confirmation:
+                raise PanelError("Подтверждение устарело. Выберите клиента заново.")
+            await state.update_data(xui_outbound_confirm=None)
+            changed = await set_client_route(panel, inbound_id, email, tag)
+            await _screen(message, "Выход назначен и проверен." if changed else "Выход уже назначен.",
+                          [("← Выход", f"xi:outinfo:{key}:{_key(tag)}")])
         elif action == "test":
             template, _ = await panel.xray_template()
             tags = [o["tag"] for o in template.get("outbounds", []) if o.get("tag")]

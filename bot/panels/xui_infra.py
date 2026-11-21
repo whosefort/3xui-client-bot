@@ -227,3 +227,32 @@ async def set_reality_target(panel: XUIClient, inbound_id: int, preset: str) -> 
                 raise PanelError("Настройка не подтверждена. Проверьте вход в 3x-ui.") from rollback_error
             raise PanelError("Ошибка изменения. Прежний вход сохранён.") from exc
         return host
+
+
+def outbound_assignments(template: dict, tag: str) -> list[dict]:
+    return [rule for rule in template.get("routing", {}).get("rules", [])
+            if rule.get("outboundTag") == tag]
+
+
+async def remove_unused_outbound(panel: XUIClient, tag: str) -> None:
+    async with panel.config_lock:
+        original, url = await panel.xray_template()
+        rows = original.get("outbounds", [])
+        if not any(row.get("tag") == tag for row in rows):
+            raise PanelError("Выход больше не существует.")
+        routing = original.get("routing", {})
+        if not tag or rows[0].get("tag") == tag or outbound_assignments(original, tag) or routing.get("script"):
+            raise PanelError("Штатный выход или выход с назначениями удаляется после проверки правил в 3x-ui.")
+        # Balancer selectors are prefix-based. Proxy chains and observatory
+        # settings can reference an outbound outside of routing.rules.
+        if (any(tag.startswith(prefix) for b in routing.get("balancers", [])
+                for prefix in b.get("selector", []))
+                or any(b.get("fallbackTag") == tag for b in routing.get("balancers", []))
+                or any(any(tag.startswith(prefix) for prefix in original.get(section, {}).get("subjectSelector", []))
+                       for section in ("observatory", "burstObservatory"))
+                or any(row.get("proxySettings", {}).get("tag") == tag or
+                       row.get("streamSettings", {}).get("sockopt", {}).get("dialerProxy") == tag for row in rows)):
+            raise PanelError("Выход используется балансировщиком, проверкой доступности или цепочкой.")
+        changed = deepcopy(original)
+        changed["outbounds"] = [row for row in changed["outbounds"] if row.get("tag") != tag]
+        await commit_template(panel, original, changed, url)

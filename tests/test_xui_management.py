@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 from bot.config import Config
 from bot.panels.base import Client, PanelError
 from bot.panels.xui import XUIClient
+from bot.panels.xui_infra import remove_unused_outbound
 from bot.panels.xui_routes import _active_rules, exit_outbound, route_client, set_client_route
 
 
@@ -92,6 +93,19 @@ class ManagedRoutesTests(unittest.IsolatedAsyncioTestCase):
                 await set_client_route(panel, 1, "other", "hungary")
             wait.assert_awaited_once_with(panel, BASE)
         self.assertEqual(panel.save_xray_template.await_args_list[-1].args, (BASE, "url"))
+
+    async def test_outbound_removal_preserves_default_and_assigned_routes(self):
+        panel = self.panel()
+        template = deepcopy(BASE)
+        template["outbounds"].append({"tag": "idle", "protocol": "freedom"})
+        panel.xray_template = AsyncMock(return_value=(template, "url"))
+        with patch("bot.panels.xui_infra.commit_template", new_callable=AsyncMock) as commit:
+            for tag in ("direct", "hungary", "blocked"):
+                with self.assertRaises(PanelError):
+                    await remove_unused_outbound(panel, tag)
+            commit.assert_not_awaited()
+            await remove_unused_outbound(panel, "idle")
+            commit.assert_awaited_once_with(panel, template, BASE, "url")
 
     async def test_pulls_exit_profile_without_manual_link(self):
         panel = XUIClient("https://panel.example/admin", exit_client="relay")

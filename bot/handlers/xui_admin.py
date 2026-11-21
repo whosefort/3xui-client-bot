@@ -238,7 +238,7 @@ async def manage(query: CallbackQuery, state: FSMContext) -> None:
         if action == "bootstrap":
             await state.set_state(XUIInput.bootstrap)
             await message.answer(
-                "Пришлите в одной строке идентификатор, IPv4, SSH-порт и DNS-имя "
+                "Пришлите в одной строке идентификатор, IPv4, SSH-порт и при желании DNS-имя "
                 "чистого VPS на Debian/Ubuntu. Например <code>newnode 203.0.113.10 22 "
                 "vpn.example.org</code>. VPS должен принимать SSH-ключ установщика. "
                 "Бот установит 3x-ui, создаст VLESS-вход и одноразовое приглашение. "
@@ -561,10 +561,11 @@ async def update_panel_address(message: Message, state: FSMContext) -> None:
 @router.message(XUIInput.bootstrap, F.text)
 async def bootstrap_panel(message: Message, state: FSMContext) -> None:
     values = message.text.split()
-    if len(values) != 4 or not values[2].isascii() or not values[2].isdigit() or len(values[2]) > 5:
+    if len(values) not in (3, 4) or not values[2].isascii() or not values[2].isdigit() or len(values[2]) > 5:
         await message.answer("Укажите идентификатор, IPv4, SSH-порт и DNS-имя. Отмена — /cancel.")
         return
-    key, host, port, domain = values
+    key, host, port, *domains = values
+    domain = domains[0] if domains else ""
     # Receive the bot username before creating an invitation on the VPS.
     bot_name = (await runtime.get_bot().me()).username
     await state.clear()
