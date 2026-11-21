@@ -165,6 +165,7 @@ def init(db_path: str) -> None:
             _conn.execute("""
                 INSERT INTO client_invites(client_username,token_hash,expires_at,claimed_by)
                 SELECT client_username,token_hash,expires_at,claimed_by FROM client_invites_legacy
+                WHERE client_username IS NOT NULL
             """)
             _conn.execute("DROP TABLE client_invites_legacy")
         except Exception:
@@ -234,7 +235,7 @@ def save_client_binding(tg_id: int, tg_username: str | None, client: str, sub_ur
                         panel_key: str = "") -> None:
     with _lock, _c() as conn:
         conn.execute(
-            "UPDATE users SET client_email=NULL, sub_id=NULL, linked_at=NULL "
+            "UPDATE users SET client_email=NULL, sub_id=NULL, linked_at=NULL, panel_key='' "
             "WHERE client_email=? AND tg_id<>? AND panel_key=?", (client, tg_id, panel_key),
         )
         conn.execute(

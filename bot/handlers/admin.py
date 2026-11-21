@@ -42,7 +42,8 @@ from ..keyboards import (admin_kb, admin_decision, broadcast_confirm_kb,
                          xray_channel_pick_kb, xray_upgrade_confirm_kb)
 from ..panels.base import Client, PanelError
 from ..panels.multi import MultiPanel
-from ..panels.ownership import create_named_client, issuance_inbounds, owner_key, subscription_targets
+from ..panels.ownership import (PanelOwnerConflict, create_named_client, ensure_panel_owner,
+                                issuance_inbounds, owner_key, subscription_targets)
 from ..runtime import get_bot, get_panel, panel_for
 from .common import BindingConflict, bind_client, binding_lock, get_traffic_gb
 
@@ -255,6 +256,13 @@ async def cb_decision(cb: CallbackQuery) -> None:
             await cb.answer("Заявка уже закреплена за другой целью.", show_alert=True)
             return
         panel_key, inbound = key, int(number)
+        try:
+            await ensure_panel_owner(req["tg_id"], key)
+        except (PanelError, OSError, TimeoutError) as exc:
+            log.warning("Не удалось проверить принадлежность заявки %s: %s", req_id, type(exc).__name__)
+            await cb.answer(str(exc) if isinstance(exc, PanelOwnerConflict)
+                            else "Не удалось проверить подписку. Повторите позже.", show_alert=True)
+            return
         if not inbound:
             try:
                 _, target = targets[key]
@@ -326,9 +334,7 @@ async def _approve_new(req) -> tuple[str, InlineKeyboardMarkup]:
     panel = panel_for(key) if key else get_panel()
     tg_id = req["tg_id"]
     async with binding_lock:
-        owner = owner_key(tg_id)
-        if owner is not None and owner != key:
-            raise PanelError("Клиент закреплён за другой панелью.")
+        await ensure_panel_owner(tg_id, key)
         created = await panel.find_by_tgid(tg_id)
         if not created:
             if key:
@@ -347,22 +353,22 @@ async def _approve_renew(req) -> tuple[str, InlineKeyboardMarkup | None]:
     key = req["panel_key"] or ""
     if not key:
         panel = get_panel()
-        current = await panel.find_by_tgid(req["tg_id"])
-        if not current:
-            return await _approve_new(req)
-        renewed = await panel.extend_client(
-            client=current, add_days=config.plan_days,
-            set_total_gb=get_traffic_gb(), reset_traffic=True,
-        )
-        days = renewed.days_left
-        return texts.renewed(days if days is not None else config.plan_days), None
+        async with binding_lock:
+            await ensure_panel_owner(req["tg_id"], key)
+            current = await panel.find_by_tgid(req["tg_id"])
+            if current:
+                renewed = await panel.extend_client(
+                    client=current, add_days=config.plan_days,
+                    set_total_gb=get_traffic_gb(), reset_traffic=True,
+                )
+                days = renewed.days_left
+                return texts.renewed(days if days is not None else config.plan_days), None
+        return await _approve_new(req)
     panel = panel_for(key)
     req_id = req["id"]
     tg_id = req["tg_id"]
     async with binding_lock:
-        owner = owner_key(tg_id)
-        if owner is not None and owner != key:
-            raise PanelError("Клиент закреплён за другой панелью.")
+        await ensure_panel_owner(tg_id, key)
         plan = db.request_renewal(req_id)
         if plan is None:
             client = await panel.find_by_tgid(tg_id)

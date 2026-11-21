@@ -8,6 +8,7 @@ from typing import Optional
 from .. import db
 from ..config import config
 from ..panels.base import Client, PanelClient, PanelError
+from ..panels.ownership import PanelOwnerConflict, ensure_panel_owner
 from ..runtime import get_bot, get_panel, panel_for, panel_key_for
 
 log = logging.getLogger("handlers")
@@ -22,9 +23,10 @@ async def bind_client(panel: PanelClient, client: Client, tg_id: int,
                       tg_username: str | None = None) -> None:
     """Под `binding_lock` проверить получателя и сохранить привязку."""
     key = panel_key_for(panel)
-    existing = db.get_user(tg_id)
-    if existing and existing["client_email"] and existing["panel_key"] != key:
-        raise BindingConflict("У этого Telegram-аккаунта уже есть подписка на другой панели.")
+    try:
+        await ensure_panel_owner(tg_id, key)
+    except PanelOwnerConflict as exc:
+        raise BindingConflict(str(exc)) from exc
     owner = await panel.find_by_tgid(tg_id)
     if owner and owner.username != client.username:
         raise BindingConflict("У этого Telegram-аккаунта уже есть другая подписка.")
@@ -58,7 +60,7 @@ async def resolve_client(tg_id: int) -> Optional[Client]:
     """
     async with binding_lock:
         user = db.get_user(tg_id)
-        key = user["panel_key"] if user else ""
+        key = user["panel_key"] if user and user["client_email"] else ""
         try:
             panel = panel_for(key) if key else get_panel()
         except PanelError:

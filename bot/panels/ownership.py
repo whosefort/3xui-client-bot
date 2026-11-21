@@ -14,6 +14,19 @@ def owner_key(tg_id: int) -> str | None:
     return record["panel_key"] if record and record["client_email"] else None
 
 
+async def ensure_panel_owner(tg_id: int, key: str) -> None:
+    owner = owner_key(tg_id)
+    if owner is None and key and runtime.get_panel() is not runtime.panel_for(key):
+        if await runtime.get_panel().find_by_tgid(tg_id):
+            owner = ""
+    if owner is not None and owner != key:
+        raise PanelOwnerConflict("У этого Telegram-аккаунта уже есть подписка на другой панели.")
+
+
+class PanelOwnerConflict(PanelError):
+    pass
+
+
 def subscription_targets() -> dict[str, tuple[str, XUIClient]]:
     primary = config.xui_base_url if config.uses("xui") else ""
     return {k: v for k, v in runtime.xui_panels.items()
@@ -37,19 +50,41 @@ async def locate_subscription(value: str, sub_id: str) -> tuple[PanelClient, Cli
                     if share_route(value.strip()) == share_route(p.sub_url_template)]
         if len(matching) == 1:
             selected = matching[0]
-            return selected, await selected.find_by_subid(sub_id)
+            failure = None
+            try:
+                client = await selected.find_by_subid(sub_id)
+            except (PanelError, OSError, TimeoutError) as exc:
+                client = None
+                failure = exc
+            if client is None:
+                legacy = await default.find_by_subid(sub_id)
+                if legacy and legacy.sub_url and share_route(legacy.sub_url) == share_route(value.strip()):
+                    return default, legacy
+            if failure:
+                raise failure
+            return selected, client
         if matching:
             raise PanelError("Адрес подписки совпадает у нескольких панелей.")
         return default, await default.find_by_subid(sub_id)
-    matches = []
-    for panel in [default, *(p for _, p in targets.values())]:
-        client = await panel.find_by_subid(sub_id)
+    legacy = await default.find_by_subid(sub_id)
+    matches = [(default, legacy)] if legacy else []
+    failed = None
+    for _, panel in targets.values():
+        if panel is default:
+            continue
+        try:
+            client = await panel.find_by_subid(sub_id)
+        except (PanelError, OSError, TimeoutError) as exc:
+            failed = exc
+            continue
         if client:
             # The existing single 3x-ui can also be in the management menu.
             if not any(c.sub_url and c.sub_url == client.sub_url for _, c in matches):
                 matches.append((panel, client))
     if len(matches) > 1:
         raise PanelError("Код совпал на нескольких панелях. Пришлите полную ссылку.")
+    if failed and not legacy:
+        raise failed
     return matches[0] if matches else (default, None)
 
 

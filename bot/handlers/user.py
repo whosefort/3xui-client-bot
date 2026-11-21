@@ -264,6 +264,11 @@ async def bind_input(message: Message, state: FSMContext) -> None:
         except BindingConflict as exc:
             await message.answer(str(exc), reply_markup=back_to_menu())
             return
+        except (PanelError, OSError, TimeoutError):
+            await state.set_state(Bind.waiting)
+            await message.answer("Не удалось привязать подписку. Пришлите ту же ссылку чуть позже.",
+                                 reply_markup=back_to_menu())
+            return
     await message.answer(texts.bind_ok(), reply_markup=bind_ok_kb())
     await notify_admins(
         f"🔗 {html.escape(_uname(message) or str(me))} (id <code>{me}</code>) "

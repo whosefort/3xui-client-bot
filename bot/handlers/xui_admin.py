@@ -19,7 +19,7 @@ from .. import db, runtime
 from ..config import config
 from ..keyboards import ADM_XUI
 from ..panels.base import PanelError
-from ..panels.ownership import create_named_client, owner_key, subscription_targets
+from ..panels.ownership import create_named_client, ensure_panel_owner, subscription_targets
 from ..panels.xui import XUIClient
 from ..panels.xui_routes import client_route, exit_outbound, outbound_tags, set_client_route
 from .common import BindingConflict, bind_client, binding_lock, get_traffic_gb
@@ -424,9 +424,7 @@ async def create_client(message: Message, state: FSMContext) -> None:
         key = data["xui_key"]
         async with binding_lock, panel.config_lock:
             if key in subscription_targets():
-                owner = owner_key(tg_id)
-                if owner is not None and owner != key:
-                    raise PanelError("У клиента уже есть подписка на другой панели.")
+                await ensure_panel_owner(tg_id, key)
             if any(c.username == email or c.tg_id == tg_id for c in await panel.list_clients(force=True)):
                 raise PanelError("На этой панели уже есть такой клиент.")
             client = await create_named_client(panel, tg_id, config.plan_days, get_traffic_gb(), inbound["id"])

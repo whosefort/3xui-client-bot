@@ -12,7 +12,7 @@ from bot import db, runtime
 from bot.config import config
 from bot.handlers import admin, common
 from bot.keyboards import grant_without_id_kb
-from bot.panels.base import Client
+from bot.panels.base import Client, PanelError
 from bot.panels.ownership import locate_subscription
 from bot.panels.xui import XUIClient
 from bot.panels.xui_infra import add_node, add_reality_preset, set_reality_target
@@ -68,7 +68,7 @@ class MixedWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.named.extend_client.assert_awaited_once()
         self.named.reset_traffic.assert_awaited_once_with(client=client)
         self.default.find_by_username.assert_not_awaited()
-        self.default.find_by_tgid.assert_not_awaited()
+        self.default.find_by_tgid.assert_awaited_once_with(100)
 
     async def test_existing_marzban_renewal_keeps_legacy_adapter_contract(self):
         client = Client("u120", tg_id=120, expire_ts=int(time.time()) + 86400)
@@ -106,6 +106,43 @@ class MixedWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.get_user(1)["panel_key"], "")
         self.assertEqual(db.get_user(2)["panel_key"], "entry")
 
+    async def test_named_outage_does_not_break_legacy_code_or_link(self):
+        client = Client("legacy", sub_url=self.named._sub_url("old-token"))
+        self.default.find_by_subid.return_value = client
+        self.named.find_by_subid.side_effect = PanelError("offline")
+        for value in ("old-token", client.sub_url):
+            panel, found = await locate_subscription(value, "old-token")
+            self.assertIs(panel, self.default)
+            self.assertIs(found, client)
+
+    async def test_bare_code_collision_requires_full_url(self):
+        self.default.find_by_subid.return_value = Client("legacy", sub_url="https://legacy.example/sub/token")
+        self.named.find_by_subid.return_value = Client("new", sub_url=self.named._sub_url("token"))
+        with self.assertRaisesRegex(PanelError, "полную ссылку"):
+            await locate_subscription("token", "token")
+
+    async def test_uncached_marzban_owner_blocks_named_issue_and_binding(self):
+        self.default.find_by_tgid.return_value = Client("legacy", tg_id=120)
+        req_id = db.create_request(120, None, "new")
+        self.assertTrue(db.claim_request(req_id, panel_key="entry", inbound_id=5))
+        with self.assertRaisesRegex(PanelError, "уже есть подписка"):
+            await admin._approve_new(db.get_request(req_id))
+        self.named.create_client.assert_not_awaited()
+        self.named.bind_tgid = AsyncMock()
+        with self.assertRaises(common.BindingConflict):
+            await common.bind_client(self.named, Client("new"), 120)
+        self.named.bind_tgid.assert_not_awaited()
+        self.assertIsNone(db.get_user(120))
+
+    async def test_displaced_named_binding_uses_legacy_lookup(self):
+        db.save_client_binding(10, None, "shared", self.named._sub_url("token"), "entry")
+        db.save_client_binding(11, None, "shared", self.named._sub_url("token"), "entry")
+        self.assertEqual(db.get_user(10)["panel_key"], "")
+        legacy = Client("legacy", tg_id=10, sub_url="https://legacy.example/sub/token")
+        self.default.find_by_tgid.return_value = legacy
+        self.assertIs(await common.resolve_client(10), legacy)
+        self.named.find_by_tgid.assert_not_awaited()
+
     def test_invitations_are_scoped_by_panel(self):
         first = db.create_client_invite("shared")
         second = db.create_client_invite("shared", "entry")
@@ -123,6 +160,8 @@ class MixedWorkflowTests(unittest.IsolatedAsyncioTestCase):
                          "NOT NULL UNIQUE, expires_at INTEGER NOT NULL, claimed_by INTEGER)")
             conn.execute("INSERT INTO client_invites VALUES(?,?,?,NULL)",
                          ("shared", hashlib.sha256(token.encode()).hexdigest(), int(time.time()) + 3600))
+            conn.execute("INSERT INTO client_invites VALUES(NULL,?,?,NULL)",
+                         ("orphaned", int(time.time()) + 3600))
         db._c().close()
         db.init(str(path))
         named = db.create_client_invite("shared", "entry")
