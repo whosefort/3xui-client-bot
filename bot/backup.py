@@ -21,8 +21,10 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from contextlib import closing
+from pathlib import Path
 
-from . import db
+from . import db, runtime
 from .config import config
 
 log = logging.getLogger("backup")
@@ -80,10 +82,12 @@ def _snapshot(src_path: str, dst_path: str) -> None:
     raise last  # type: ignore[misc]
 
 
-def _maybe_encrypt(path: str) -> tuple[str, bool]:
+def _maybe_encrypt(path: str, *, required: bool = False) -> tuple[str, bool]:
     """Зашифровать age-публичным ключом, если он задан. (путь, зашифровано?)."""
     pubkey = (config.backup_age_pubkey or "").strip()
     if not pubkey:
+        if required:
+            raise ValueError("Age public key is required")
         return path, False
     try:
         import pyrage  # ленивый импорт
@@ -97,6 +101,8 @@ def _maybe_encrypt(path: str) -> tuple[str, bool]:
         os.remove(path)
         return out, True
     except Exception as e:  # noqa: BLE001
+        if required:
+            raise
         log.error("age-шифрование не удалось (%s) — заливаю без шифрования", e)
         return path, False
 
@@ -123,6 +129,58 @@ def _r2_configured() -> bool:
 # Защита от наложения: ручной /backup (или кнопка) и суточный запуск не должны
 # идти одновременно.
 _lock = asyncio.Lock()
+
+
+def _validate_xui_backup(file: Path) -> str:
+    with file.open("rb") as stream:
+        header = stream.read(16)
+    if header == b"SQLite format 3\x00":
+        with closing(sqlite3.connect(file.as_uri() + "?mode=ro&immutable=1", uri=True)) as db_copy:
+            if db_copy.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                raise ValueError("Invalid SQLite backup")
+            if not db_copy.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbounds'"
+            ).fetchone():
+                raise ValueError("Not a 3x-ui database")
+        return "db"
+    if len(header) == 16 and header.startswith(b"PGDMP"):
+        return "dump"
+    raise ValueError("Unrecognized 3x-ui backup format")
+
+
+async def _backup_xui(key: str, tmpdir: str) -> int:
+    _, panel = runtime.xui_panels[key]
+    date = time.strftime("%Y-%m-%d", time.gmtime())
+    stamp = time.time_ns()
+    snap = Path(tmpdir) / f"xui-{key}.snapshot"
+    await panel.download_database(snap)
+    ext = await asyncio.to_thread(_validate_xui_backup, snap)
+    final, encrypted = await asyncio.to_thread(_maybe_encrypt, str(snap), required=True)
+    if not encrypted:
+        raise ValueError("3x-ui backup is not encrypted")
+    size = os.path.getsize(final)
+    await asyncio.to_thread(_upload, final, f"backups/{date}/xui/{key}/{stamp}.{ext}.age")
+    db.set_setting(f"xui_backup_at:{key}", str(int(time.time())))
+    return size
+
+
+async def run_xui_backup(key: str) -> str:
+    if key not in runtime.xui_panels:
+        return "Панель больше не подключена."
+    if not effective_enabled() or not _r2_configured():
+        return "Резервное копирование в R2 выключено или не настроено."
+    if not config.backup_age_pubkey.strip():
+        return "Для экспорта 3x-ui нужен BACKUP_AGE_PUBKEY."
+    if _lock.locked():
+        return "Резервное копирование уже выполняется."
+    async with _lock:
+        try:
+            with tempfile.TemporaryDirectory(prefix="xui_backup_") as tmpdir:
+                size = await _backup_xui(key, tmpdir)
+            return f"✅ Снимок 3x-ui зашифрован и сохранён в R2 ({_human(size)})."
+        except Exception as e:
+            log.warning("3x-ui backup failed (%s): %s", key, type(e).__name__)
+            return f"⚠️ Не удалось сохранить бэкап 3x-ui ({type(e).__name__})."
 
 
 async def run_backup() -> str:
@@ -176,6 +234,18 @@ async def run_backup() -> str:
                 except Exception as e:  # noqa: BLE001
                     log.exception("backup source %s failed", name)
                     fail_parts.append(f"{name} ⚠️{type(e).__name__}")
+
+            for key in runtime.xui_panels:
+                try:
+                    if not expect_enc:
+                        fail_parts.append(f"3x-ui/{key} ⚠️нужен age")
+                        continue
+                    size = await _backup_xui(key, tmpdir)
+                    enc_count += 1
+                    ok_parts.append(f"3x-ui/{key} {_human(size)}")
+                except Exception as e:
+                    log.warning("3x-ui backup failed (%s): %s", key, type(e).__name__)
+                    fail_parts.append(f"3x-ui/{key} ⚠️{type(e).__name__}")
 
             if not ok_parts:
                 return "⚠️ ошибка: " + ", ".join(fail_parts)
