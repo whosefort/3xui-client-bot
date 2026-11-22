@@ -32,6 +32,33 @@ def init(db_path: str) -> None:
     _conn.row_factory = sqlite3.Row
     _conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS private_billings (
+            id INTEGER PRIMARY KEY,
+            tg_id INTEGER NOT NULL,
+            server TEXT NOT NULL,
+            amount INTEGER NOT NULL CHECK(amount > 0),
+            due TEXT NOT NULL,
+            billing_day INTEGER NOT NULL CHECK(billing_day BETWEEN 1 AND 31),
+            reminders INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(tg_id, server)
+        );
+        CREATE TABLE IF NOT EXISTS private_billing_events (
+            billing_id INTEGER NOT NULL,
+            due TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            PRIMARY KEY(billing_id, due, kind)
+        );
+        CREATE TABLE IF NOT EXISTS private_billing_payments (
+            billing_id INTEGER NOT NULL,
+            due TEXT NOT NULL,
+            tg_id INTEGER NOT NULL,
+            server TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            next_due TEXT NOT NULL,
+            notified INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(billing_id, due)
+        );
+
         CREATE TABLE IF NOT EXISTS users (
             tg_id        INTEGER PRIMARY KEY,
             tg_username  TEXT,
@@ -541,3 +568,75 @@ def purge_old_node_tokens() -> int:
         )
         _c().commit()
         return cur.rowcount
+
+
+def private_billings() -> list[sqlite3.Row]:
+    with _lock:
+        return _c().execute("SELECT * FROM private_billings ORDER BY due, id").fetchall()
+
+
+def private_billing(billing_id: int) -> sqlite3.Row | None:
+    with _lock:
+        return _c().execute("SELECT * FROM private_billings WHERE id=?", (billing_id,)).fetchone()
+
+
+def save_private_billing(tg_id: int, server: str, amount: int, due: str, day: int,
+                         billing_id: int | None) -> int:
+    with _lock, _c() as conn:
+        if billing_id is None:
+            return conn.execute(
+                "INSERT INTO private_billings(tg_id,server,amount,due,billing_day) VALUES(?,?,?,?,?)",
+                (tg_id, server, amount, due, day),
+            ).lastrowid
+        if conn.execute("SELECT 1 FROM private_billing_payments WHERE billing_id=? AND due=?",
+                        (billing_id, due)).fetchone():
+            raise ValueError("Платёж на эту дату уже отмечен.")
+        conn.execute(
+            "UPDATE private_billings SET tg_id=?,server=?,amount=?,billing_day=CASE WHEN due=? "
+            "THEN billing_day ELSE ? END,due=? WHERE id=?",
+            (tg_id, server, amount, due, day, due, billing_id),
+        )
+        return billing_id
+
+
+def set_private_reminders(billing_id: int, enabled: bool) -> None:
+    with _lock, _c() as conn:
+        conn.execute("UPDATE private_billings SET reminders=? WHERE id=?", (enabled, billing_id))
+
+
+def mark_private_paid(billing_id: int, due: str, amount: int, next_due: str) -> bool:
+    with _lock, _c() as conn:
+        changed = conn.execute(
+            "UPDATE private_billings SET due=? WHERE id=? AND due=? AND amount=?",
+            (next_due, billing_id, due, amount),
+        )
+        if not changed.rowcount:
+            return False
+        conn.execute(
+            "INSERT INTO private_billing_payments(billing_id,due,tg_id,server,amount,next_due) "
+            "SELECT id,?,tg_id,server,amount,? FROM private_billings WHERE id=?",
+            (due, next_due, billing_id),
+        )
+        return True
+
+
+def private_event_sent(billing_id: int, due: str, kind: str) -> bool:
+    with _lock:
+        return _c().execute("SELECT 1 FROM private_billing_events WHERE billing_id=? AND due=? AND kind=?",
+                            (billing_id, due, kind)).fetchone() is not None
+
+
+def mark_private_event_sent(billing_id: int, due: str, kind: str) -> None:
+    with _lock, _c() as conn:
+        conn.execute("INSERT OR IGNORE INTO private_billing_events VALUES(?,?,?)", (billing_id, due, kind))
+
+
+def private_unnotified_payments() -> list[sqlite3.Row]:
+    with _lock:
+        return _c().execute("SELECT * FROM private_billing_payments WHERE notified=0").fetchall()
+
+
+def mark_private_payment_notified(billing_id: int, due: str) -> None:
+    with _lock, _c() as conn:
+        conn.execute("UPDATE private_billing_payments SET notified=1 WHERE billing_id=? AND due=?",
+                     (billing_id, due))

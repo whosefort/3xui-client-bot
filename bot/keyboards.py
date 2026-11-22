@@ -167,6 +167,7 @@ ADM_BROADCAST = "📢 Рассылка"
 ADM_ADD_SERVER = "🖥 Добавить сервер"
 ADM_SERVERS = "🌍 Серверы"
 ADM_REALITY = "🛡 Соединение"
+ADM_PRIVATE_BILLING = "💳 Частные серверы"
 ADM_XUI = "🖥 Панели 3x-ui"
 
 
@@ -193,6 +194,8 @@ def admin_kb(show_add_server: bool = False, show_servers: bool = False,
     if show_xui:
         kb.button(text=ADM_XUI)
         rows.append(1)
+    kb.button(text=ADM_PRIVATE_BILLING)
+    rows.append(1)
     kb.adjust(*rows)
     return kb.as_markup(resize_keyboard=True, is_persistent=True)
 

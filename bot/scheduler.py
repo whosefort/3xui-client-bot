@@ -1,27 +1,32 @@
 """Планировщик: ежедневные напоминания об окончании подписки + heartbeat админу.
 
 Источник правды о сроке — 3X-UI (читаем на лету). Дедуп — таблица reminders_log:
-одно напоминание на (клиент, дата конца подписки, порог дней). Если бот лежал и
-пропустил точный день — на следующем запуске «догонит» за счёт условия days<=bucket.
+одно напоминание на (клиент, дата конца подписки, порог дней).
+Даты окончания считаются по календарю Москвы.
 """
 from __future__ import annotations
 
 import datetime as dt
 import logging
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import db, texts
+from . import db, private_billing, texts
 from .config import config
 from .keyboards import reminder_kb
 from .runtime import get_bot, panel_for
 
 log = logging.getLogger("scheduler")
+_moscow = ZoneInfo("Europe/Moscow")
 
 
-async def reminders_sweep() -> None:
+async def reminders_sweep(*, expiry_only: bool = False) -> None:
     bot = get_bot()
-    buckets = sorted(config.remind_days_before, reverse=True)  # напр. [3,1,0]
+    buckets = {0}
+    if not expiry_only:
+        buckets.update(days for days in config.remind_days_before if days > 0)
+    today = dt.datetime.now(_moscow).date()
     checked = sent = 0
 
     by_panel = {}
@@ -44,13 +49,14 @@ async def reminders_sweep() -> None:
                 continue
             checked += 1
 
-            days = client.days_left
-            if days is None:  # бессрочно
-                continue
             exp_ts = int(client.expire_ts or 0)
-            if exp_ts <= 0:
+            if exp_ts <= 0 or client.access_status != "active":
                 continue
-            expiry_date = dt.datetime.fromtimestamp(exp_ts).strftime("%Y-%m-%d")
+            expiry = dt.datetime.fromtimestamp(exp_ts, _moscow).date()
+            days = (expiry - today).days
+            if days < 0:
+                continue
+            expiry_date = expiry.isoformat()
 
             eligible = [b for b in buckets
                         if days <= b and not db.already_reminded(tg_id, expiry_date, b)]
@@ -106,7 +112,12 @@ def setup_scheduler() -> AsyncIOScheduler:
     sched = AsyncIOScheduler(timezone="Europe/Moscow")
     sched.add_job(reminders_sweep, "cron", hour=config.remind_hour, minute=0,
                   id="reminders", misfire_grace_time=3600)
+    if config.remind_hour != 0:
+        sched.add_job(reminders_sweep, "cron", hour=0, minute=0, kwargs={"expiry_only": True},
+                      id="expiry_day", misfire_grace_time=3600)
     # misfire_grace_time, чтобы рестарт бота около :05 не съел суточный бэкап+отбивку.
     sched.add_job(heartbeat, "cron", hour=config.remind_hour, minute=5,
                   id="heartbeat", misfire_grace_time=3600)
+    sched.add_job(private_billing.sweep, "cron", minute=10, id="private_billing",
+                  misfire_grace_time=3600, coalesce=True)
     return sched
