@@ -497,7 +497,18 @@ async def bind_named(message: Message, state: FSMContext) -> None:
             client = await panel.find_by_username(email)
             if client is None:
                 raise PanelError("Клиент больше не существует.")
-            await bind_client(panel, client, tg_id)
+            primary = db.get_user(tg_id)
+            if primary and primary["client_email"] and (primary["panel_key"], primary["client_email"]) != (key, email):
+                if client.tg_id not in (0, tg_id):
+                    raise BindingConflict("Профиль принадлежит другому пользователю.")
+                if client.tg_id != tg_id:
+                    await panel.bind_tgid(client=client, tg_id=tg_id)
+                try:
+                    db.save_additional_subscription(tg_id, key, email)
+                except ValueError as exc:
+                    raise BindingConflict(str(exc)) from exc
+            else:
+                await bind_client(panel, client, tg_id)
         await state.clear()
         await message.answer("Telegram ID привязан. Подписка доступна клиенту через бота.")
     except (PanelError, BindingConflict) as e:

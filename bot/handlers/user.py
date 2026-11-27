@@ -10,6 +10,8 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from .. import runtime
 
 from .. import db, texts
 from ..config import config
@@ -77,12 +79,34 @@ async def cb_menu(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "status", F.message.chat.type == "private")
 async def cb_status(cb: CallbackQuery) -> None:
+    extras = db.additional_subscriptions(cb.from_user.id)
+    if extras:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Основная подписка", callback_data="sub:primary")
+        for row in extras:
+            key = row["panel_key"]
+            name = runtime.xui_panels.get(key, (key, None))[0]
+            kb.button(text=f"{name} · {row['client_email']}", callback_data=f"sub:extra:{row['id']}")
+        kb.button(text="↩️ В меню", callback_data="menu")
+        await cb.message.edit_text("Ваши подписки", reply_markup=kb.adjust(1).as_markup())
+        await cb.answer()
+        return
+    await primary_status(cb)
+
+
+@router.callback_query(F.data == "sub:primary", F.message.chat.type == "private")
+async def primary_status(cb: CallbackQuery) -> None:
     cl = await resolve_client(cb.from_user.id)
     if not cl:
         await cb.message.edit_text(texts.status_none(), reply_markup=main_menu(False))
         await cb.answer()
         return
 
+    await cb.message.edit_text(_status_text(cl), reply_markup=status_kb())
+    await cb.answer()
+
+
+def _status_text(cl):
     days = cl.days_left
     if not cl.enabled or (days is not None and days <= 0):
         text = texts.status_expired()
@@ -94,7 +118,28 @@ async def cb_status(cb: CallbackQuery) -> None:
         text = texts.status_unlimited(cl.all_subs)
     else:
         text = texts.status_active(days, cl.all_subs)
-    await cb.message.edit_text(text, reply_markup=status_kb())
+    return text
+
+
+@router.callback_query(F.data.startswith("sub:extra:"), F.message.chat.type == "private")
+async def extra_status(cb: CallbackQuery) -> None:
+    row = next((r for r in db.additional_subscriptions(cb.from_user.id)
+                if str(r["id"]) == cb.data.split(":")[-1]), None)
+    if row is None:
+        await cb.answer("Подписка недоступна.", show_alert=True)
+        return
+    try:
+        panel = panel_for(row["panel_key"])
+        cl = await panel.find_by_username(row["client_email"])
+    except PanelError:
+        await cb.answer("Панель временно недоступна.", show_alert=True)
+        return
+    if cl is None or cl.tg_id != cb.from_user.id:
+        await cb.answer("Привязка подписки изменилась.", show_alert=True)
+        return
+    kb = InlineKeyboardBuilder()
+    kb.button(text="← Мои подписки", callback_data="status")
+    await cb.message.edit_text(_status_text(cl), reply_markup=kb.as_markup())
     await cb.answer()
 
 

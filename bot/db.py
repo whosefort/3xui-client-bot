@@ -67,6 +67,15 @@ def init(db_path: str) -> None:
             linked_at    INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS additional_subscriptions (
+            id INTEGER PRIMARY KEY,
+            tg_id INTEGER NOT NULL,
+            panel_key TEXT NOT NULL,
+            client_email TEXT NOT NULL,
+            UNIQUE(panel_key, client_email)
+        );
+        CREATE INDEX IF NOT EXISTS additional_owner ON additional_subscriptions(tg_id);
+
         CREATE TABLE IF NOT EXISTS requests (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             tg_id       INTEGER NOT NULL,
@@ -258,6 +267,23 @@ def get_user(tg_id: int) -> Optional[sqlite3.Row]:
         return _c().execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
 
 
+def additional_subscriptions(tg_id: int):
+    with _lock:
+        return _c().execute("SELECT * FROM additional_subscriptions WHERE tg_id=? ORDER BY id",
+                            (tg_id,)).fetchall()
+
+
+def save_additional_subscription(tg_id: int, panel_key: str, email: str) -> None:
+    with _lock, _c() as conn:
+        row = conn.execute(
+            "INSERT INTO additional_subscriptions(tg_id,panel_key,client_email) VALUES(?,?,?) "
+            "ON CONFLICT(panel_key,client_email) DO UPDATE SET client_email=excluded.client_email "
+            "WHERE tg_id=excluded.tg_id RETURNING id", (tg_id, panel_key, email)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Подписка уже принадлежит другому пользователю.")
+
+
 def save_client_binding(tg_id: int, tg_username: str | None, client: str, sub_url: str,
                         panel_key: str = "") -> None:
     with _lock, _c() as conn:
@@ -317,6 +343,8 @@ def revoke_client_invite(client: str) -> None:
 
 def clear_panel_client(panel_key: str, username: str) -> None:
     with _lock, _c() as conn:
+        conn.execute("DELETE FROM additional_subscriptions WHERE panel_key=? AND client_email=?",
+                     (panel_key, username))
         conn.execute("UPDATE users SET client_email=NULL,sub_id=NULL,linked_at=NULL,panel_key='' "
                      "WHERE panel_key=? AND client_email=?", (panel_key, username))
         conn.execute("DELETE FROM client_invites WHERE panel_key=? AND client_username=?",
