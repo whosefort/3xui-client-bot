@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -172,7 +173,7 @@ async def infrastructure(query: CallbackQuery, state: FSMContext) -> None:
                 changed = await infra.add_outbound(panel, outbound)
                 await _screen(message, "Выход создан." if changed else "Выход уже настроен.",
                               [("Открыть выход", f"xi:outinfo:{key}:{_key(outbound['tag'])}"), cancel])
-        elif action in ("outinfo", "outdel", "outconfirm"):
+        elif action in ("outinfo", "outdel", "outconfirm", "copies", "cp", "applycp"):
             template, _ = await panel.xray_template()
             matches = [o for o in template.get("outbounds", []) if o.get("tag") and _key(o["tag"]) == args[0]]
             if len(matches) != 1:
@@ -180,6 +181,36 @@ async def infrastructure(query: CallbackQuery, state: FSMContext) -> None:
             outbound = matches[0]
             tag = outbound["tag"]
             outbound_back = ("← Исходящие", f"xi:out:{key}")
+            if action == "copies":
+                rows = [(name, f"xi:cp:{key}:{args[0]}:{other}")
+                        for other, (name, _) in runtime.xui_panels.items() if other != key]
+                await _screen(message, f"На какой сервер скопировать {html.escape(tag)}?",
+                              [*rows, ("← Выход", f"xi:outinfo:{key}:{args[0]}")])
+                return
+            if action in ("cp", "applycp"):
+                target = args[1]
+                if target == key or target not in runtime.xui_panels:
+                    raise PanelError("Выберите другую подключённую панель.")
+                target_name, target_panel = runtime.xui_panels[target]
+                chain = infra.outbound_chain(template, tag)
+                digest = hashlib.sha256(json.dumps(chain, sort_keys=True).encode()).hexdigest()
+                confirmation = [message.message_id, key, target, digest]
+                if action == "cp":
+                    await state.update_data(copy_confirmation=confirmation)
+                    names = ", ".join(html.escape(row["tag"]) for row in chain)
+                    await _screen(message, f"{title} → {html.escape(target_name)}\n"
+                                  f"Выходы: {names}\nПри копировании параметры доступа попадут "
+                                  "на выбранный сервер. При изменении конфигурации его Xray перезапустится.",
+                                  [("Скопировать", f"xi:applycp:{key}:{args[0]}:{target}"),
+                                   ("Отмена", f"xi:outinfo:{key}:{args[0]}")])
+                    return
+                if (await state.get_data()).get("copy_confirmation") != confirmation:
+                    raise PanelError("Откройте предпросмотр заново: выбор или настройки изменились.")
+                await state.update_data(copy_confirmation=None)
+                changed = await infra.copy_outbounds(target_panel, chain)
+                await _screen(message, "Выход скопирован." if changed else "Этот выход уже настроен.",
+                              [("Открыть на выбранном сервере", f"xi:outinfo:{target}:{args[0]}")])
+                return
             if action == "outconfirm":
                 await infra.remove_unused_outbound(panel, tag)
                 await _screen(message, "Выход удалён.", [outbound_back])
@@ -194,6 +225,8 @@ async def infrastructure(query: CallbackQuery, state: FSMContext) -> None:
                 subjects = ", ".join(str(x) for x in (rule.get("user") or rule.get("inboundTag") or []))
                 assigned.append("• " + html.escape(subjects[:100] or "Общее правило"))
             rows = []
+            if len(runtime.xui_panels) > 1:
+                rows.append(("Скопировать на другой сервер", f"xi:copies:{key}:{args[0]}"))
             if tag in outbound_tags(template):
                 rows.append(("Назначить клиенту", f"xi:outpick:{key}:{args[0]}"))
             if outbound.get("protocol") not in ("blackhole", "dns"):

@@ -126,6 +126,51 @@ async def add_outbound(panel: XUIClient, new: dict) -> bool:
     return True
 
 
+def outbound_chain(template: dict, tag: str) -> list[dict]:
+    """Collect the selected exit and its explicitly referenced upstream exits."""
+    rows = template.get("outbounds", [])
+    chain = []
+    seen = set()
+
+    def collect(name, parents):
+        if name in parents:
+            raise PanelError("В цепочке выходов обнаружен цикл.")
+        if name in seen:
+            return
+        matches = [row for row in rows if row.get("tag") == name]
+        if len(matches) != 1:
+            raise PanelError("Связанный выход отсутствует или его тег неоднозначен.")
+        row = matches[0]
+        for upstream in (row.get("proxySettings", {}).get("tag"),
+                         row.get("streamSettings", {}).get("sockopt", {}).get("dialerProxy")):
+            if upstream:
+                collect(upstream, parents | {name})
+        chain.append(row)
+        seen.add(name)
+
+    collect(tag, set())
+    return chain
+
+
+async def copy_outbounds(panel: XUIClient, chain: list[dict]) -> bool:
+    async with panel.config_lock:
+        original, url = await panel.xray_template()
+        draft = deepcopy(original)
+        rows = draft.get("outbounds")
+        if not rows:
+            raise PanelError("На принимающей панели отсутствует штатный выход.")
+        for new in chain:
+            matches = [row for row in rows if row.get("tag") == new["tag"]]
+            if matches and matches != [new]:
+                raise PanelError(f"Тег {new['tag']} занят другой конфигурацией.")
+            if not matches:
+                rows.append(deepcopy(new))
+        if draft == original:
+            return False
+        await commit_template(panel, original, draft, url)
+        return True
+
+
 async def _candidate(panel: XUIClient, hostname: str) -> str | None:
     try:
         result = await panel._request("POST", "/panel/api/server/scanRealityTarget",
