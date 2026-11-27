@@ -56,7 +56,7 @@ def _key(text: str) -> str:
 
 def _keyboard(rows: Iterable[tuple[str, str]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label[:64], callback_data=callback if callback.startswith("xi:") else f"xu:{callback}")]
+        [InlineKeyboardButton(text=label[:64], callback_data=callback if callback.startswith(("xi:", "srv:")) else f"xu:{callback}")]
         for label, callback in rows
     ])
 
@@ -115,10 +115,10 @@ async def _show_panel(message: Message, key: str, page: int) -> None:
         rows.append(("← Предыдущие входы", f"p:{key}:{start // PAGE_SIZE - 1}"))
     if start + PAGE_SIZE < len(inbounds):
         rows.append(("Следующие входы →", f"p:{key}:{start // PAGE_SIZE + 1}"))
-    rows += [("Ноды", f"xi:nodes:{key}"), ("Исходящие и тесты", f"xi:out:{key}"),
+    rows += [("Ноды мастер-панели", f"xi:nodes:{key}"), ("Аутбаунды и назначения", f"xi:out:{key}"),
              ("➕ Вход по пресету", f"xi:presets:{key}:in"),
              ("Адрес панели", f"addr:{key}"), ("Резервная копия", f"xi:backup:{key}"),
-             ("← Панели", "home")]
+             ("← Все серверы", "srv:home")]
     await _show(message, f"<b>{html.escape(name)}</b>\nXray {html.escape(str(xray.get('version') or ''))}"
                 f" · {html.escape(str(xray.get('state') or 'неизвестно'))}\n"
                 f"Входов: {len(inbounds)}", rows)

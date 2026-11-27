@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .. import backup, db, runtime
 from ..config import config
 from ..panels.base import PanelError
-from ..panels.xui_routes import outbound_tags, set_client_route
+from ..panels.xui_routes import exit_outbound, outbound_tags, set_client_route
 from ..panels import xui_infra as infra
 
 router = Router(name="xui_infra")
@@ -36,8 +36,7 @@ async def _nodes(message: Message, key: str) -> None:
     nodes = await infra.list_nodes(panel)
     rows = [(f"{n.get('name') or n['id']} · {n.get('status') or '—'}", f"xi:node:{key}:{n['id']}")
             for n in nodes[:30]]
-    if any(other != key and p.node_token for other, (_, p) in runtime.xui_panels.items()):
-        rows.append(("➕ Подключить зарегистрированную панель", f"xi:peers:{key}"))
+    rows.append(("➕ Подключить ноду к мастеру", f"xi:peers:{key}"))
     rows.append(("← Панель", f"xu:p:{key}:0"))
     await _screen(message, f"<b>{html.escape(name)} · Ноды</b>\nПодключено: {len(nodes)}", rows)
 
@@ -131,8 +130,8 @@ async def infrastructure(query: CallbackQuery, state: FSMContext) -> None:
         elif action == "peers":
             candidates = [(n, f"xi:peer:{key}:{k}") for k, (n, p) in runtime.xui_panels.items()
                           if k != key and p.node_token]
-            await _screen(message, "Выберите панель, которую нужно зарегистрировать как ноду.",
-                          [*candidates, ("← Ноды", f"xi:nodes:{key}")])
+            await _screen(message, "Выберите будущую ноду. Здесь видны другие зарегистрированные панели с токеном ноды.",
+                          [*candidates, ("Зарегистрировать готовую 3x-ui", "xu:register"), ("← Ноды", f"xi:nodes:{key}")])
         elif action in ("peer", "attach"):
             other_key = args[0]
             if other_key == key or other_key not in runtime.xui_panels:
@@ -150,9 +149,29 @@ async def infrastructure(query: CallbackQuery, state: FSMContext) -> None:
             outs = template.get("outbounds", [])
             rows = [(f"{o['tag']} · {o.get('protocol')}", f"xi:outinfo:{key}:{_key(o['tag'])}")
                     for o in outs[:35] if o.get("tag")]
-            rows += [("➕ Пресеты выхода", f"xi:presets:{key}:out"), back]
+            rows += [("➕ Выход через другую панель", f"xi:relay:{key}"), ("➕ Пресеты выхода", f"xi:presets:{key}:out"), back]
             await _screen(message, f"<b>{title} · Исходящие</b>\n"
                           "Откройте выход, чтобы проверить его и посмотреть назначения.", rows)
+        elif action == "relay":
+            rows = [(name, f"xi:relaypick:{key}:{other}") for other, (name, peer)
+                    in runtime.xui_panels.items() if other != key and peer.exit_client]
+            await _screen(message, "Выберите панель с выделенным клиентом выхода VLESS REALITY.",
+                          [*rows, ("← Аутбаунды", f"xi:out:{key}")])
+        elif action in ("relaypick", "relayadd"):
+            peer_key = args[0]
+            if peer_key == key or peer_key not in runtime.xui_panels:
+                raise PanelError("Выходная панель недоступна.")
+            peer_name, peer = runtime.xui_panels[peer_key]
+            cancel = ("← Аутбаунды", f"xi:out:{key}")
+            if action == "relaypick":
+                await _screen(message, f"Создать на {title} выход через {html.escape(peer_name)}? "
+                              "Xray кратковременно перезапустится. Назначить клиентов можно после создания.",
+                              [("Создать выход", f"xi:relayadd:{key}:{peer_key}"), cancel])
+            else:
+                outbound = await exit_outbound(peer, peer_key)
+                changed = await infra.add_outbound(panel, outbound)
+                await _screen(message, "Выход создан." if changed else "Выход уже настроен.",
+                              [("Открыть выход", f"xi:outinfo:{key}:{_key(outbound['tag'])}"), cancel])
         elif action in ("outinfo", "outdel", "outconfirm"):
             template, _ = await panel.xray_template()
             matches = [o for o in template.get("outbounds", []) if o.get("tag") and _key(o["tag"]) == args[0]]

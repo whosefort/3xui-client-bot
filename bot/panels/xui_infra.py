@@ -106,7 +106,10 @@ async def test_outbound(panel: XUIClient, tag: str) -> dict:
 
 
 async def add_outbound_preset(panel: XUIClient, preset: str) -> bool:
-    new = OUTBOUND_PRESETS[preset]
+    return await add_outbound(panel, OUTBOUND_PRESETS[preset])
+
+
+async def add_outbound(panel: XUIClient, new: dict) -> bool:
     async with panel.config_lock:
         original, url = await panel.xray_template()
         changed = deepcopy(original)
@@ -116,7 +119,7 @@ async def add_outbound_preset(panel: XUIClient, preset: str) -> bool:
         existing = next((o for o in rows if o.get("tag") == new["tag"]), None)
         if existing is not None:
             if existing != new:
-                raise PanelError("Тег пресета уже занят другой конфигурацией.")
+                raise PanelError("Тег выхода уже занят другой конфигурацией.")
             return False
         rows.append(deepcopy(new))
         await commit_template(panel, original, changed, url)

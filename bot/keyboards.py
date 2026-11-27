@@ -182,6 +182,7 @@ def admin_kb(show_add_server: bool = False, show_servers: bool = False,
     kb.button(text=ADM_SETTINGS)
     kb.button(text=ADM_BROADCAST)
     rows = [2, 2, 2]
+    show_servers = show_servers or show_xui
     tail = int(show_servers) + int(show_add_server) + int(show_reality)
     if show_servers:
         kb.button(text=ADM_SERVERS)
@@ -191,9 +192,6 @@ def admin_kb(show_add_server: bool = False, show_servers: bool = False,
         kb.button(text=ADM_ADD_SERVER)
     if tail:
         rows.append(tail)
-    if show_xui:
-        kb.button(text=ADM_XUI)
-        rows.append(1)
     kb.button(text=ADM_PRIVATE_BILLING)
     rows.append(1)
     kb.adjust(*rows)
@@ -253,6 +251,7 @@ def servers_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     kb.button(text="🔄 Обновить xray на всех нодах", callback_data="srv:xrayup")
     kb.button(text="🩺 Проверить все ноды", callback_data="srv:verifyall")
     kb.button(text="📊 Ресурсы серверов", callback_data="srv:resources")
+    kb.button(text="← Все серверы", callback_data="srv:home")
     kb.button(text="✖️ Закрыть", callback_data="srv:close")
     kb.adjust(1)
     return kb.as_markup()

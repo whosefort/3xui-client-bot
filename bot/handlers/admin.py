@@ -1419,28 +1419,31 @@ async def _node_status_map() -> dict[str, str]:
     return {n["address"]: n.get("status", "") for n in nodes}
 
 
-@router.message(F.text == kb.ADM_SERVERS)
+@router.message(F.text == kb.ADM_SERVERS, F.chat.type == "private")
 async def kb_servers(message: Message, state: FSMContext) -> None:
     await state.clear()
-    if not _servers_available():
-        await message.answer("Недоступно: нужен PANEL_BACKEND=marzban.")
-        return
-    try:
-        servers = await node_provision.list_servers()
-    except node_provision.ProvisionError as e:
-        await message.answer(f"❌ Не удалось получить список: {e}")
-        return
-    if not servers:
-        await message.answer("Серверов пока нет.")
-        return
-    status_map = await _node_status_map()
-    items = [(f"{s['tag']}:{s['index']}", _server_label(s, status_map)) for s in servers]
-    await message.answer(
-        f"🌍 Серверов: <b>{len(servers)}</b>\n"
-        f"Имя в списке — то, что клиент видит в своём VPN-приложении. "
-        f"🟢/🔴 — статус ноды в панели (connected/нет).",
-        reply_markup=kb.servers_list_kb(items),
-    )
+    await message.answer("🌍 <b>Управление серверами</b>", reply_markup=_management_keyboard())
+
+
+def _management_keyboard() -> InlineKeyboardMarkup:
+    from .. import runtime
+
+    rows = [(f"{name} · 3x-ui", f"xu:p:{key}:0")
+            for key, (name, _) in runtime.xui_panels.items()]
+    if _servers_available():
+        rows.insert(0, ("Серверы Marzban", "srv:list"))
+    rows.extend([("Подключить готовую 3x-ui", "xu:register"),
+                 ("Установить 3x-ui на VPS", "xu:bootstrap")])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=callback)] for label, callback in rows
+    ])
+
+
+@router.callback_query(F.data == "srv:home", F.message.chat.type == "private")
+async def server_home(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cb.message.edit_text("🌍 <b>Управление серверами</b>", reply_markup=_management_keyboard())
+    await cb.answer()
 
 
 @router.callback_query(F.data == "srv:close")
