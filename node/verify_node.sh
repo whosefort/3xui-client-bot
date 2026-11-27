@@ -96,7 +96,8 @@ p = urlparse(link)
 q = dict(parse_qsl(p.query))
 print(json.dumps({
     "username": username, "tag": tag,
-    "uuid": p.username, "pbk": q.get("pbk"), "sid": q.get("sid"),
+    "uuid": p.username, "network": q.get("type", "tcp"), "path": q.get("path", "/"), "mode": q.get("mode", "auto"), "flow": q.get("flow", ""),
+        "pbk": q.get("pbk"), "sid": q.get("sid"),
     "sni": q.get("sni"), "fp": q.get("fp", "chrome"),
 }))
 PY
@@ -138,9 +139,9 @@ cfg = {
     "outbounds": [{
         "protocol": "vless",
         "settings": {"vnext": [{"address": node_ip, "port": 443, "users": [
-            {"id": d["uuid"], "encryption": "none", "flow": "xtls-rprx-vision"}
+            {"id": d["uuid"], "encryption": "none", "flow": d.get("flow", "")}
         ]}]},
-        "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
+        "streamSettings": {"network": d["network"], **({"xhttpSettings": {"path": d["path"], "mode": d["mode"]}} if d["network"] == "xhttp" else {}), "security": "reality", "realitySettings": {
             "serverName": d["sni"], "fingerprint": d["fp"],
             "publicKey": d["pbk"], "shortId": d["sid"], "spiderX": "/",
         }},

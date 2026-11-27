@@ -18,7 +18,8 @@ trap 'printf "3x-ui setup failed: %s (line %s)\n" "$phase" "$LINENO" >&4' ERR
 exec >/dev/null 2>&1
 if [[ ! -f $state/target ]]; then
     [[ ! -e /etc/x-ui/x-ui.db && ! -e /usr/local/x-ui && ! -e /etc/caddy/Caddyfile ]]
-    ! ss -H -ltn '( sport = :80 or sport = :443 or sport = :2053 or sport = :2096 or sport = :24443 )' | grep -q .
+    listeners=$(ss -H -ltn '( sport = :80 or sport = :443 or sport = :2053 or sport = :2096 or sport = :24443 )')
+    [[ -z $listeners ]]
     if command -v docker >/dev/null; then
         [[ -z $(docker ps -aq) ]]
     fi

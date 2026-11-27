@@ -449,7 +449,7 @@ try:
         p = urlparse(link)
         q = dict(parse_qsl(p.query, keep_blank_values=True))
         if (p.scheme == "vless" and p.username == client_id and q.get("security") == "reality"
-                and q.get("flow") == "xtls-rprx-vision"
+                and (q.get("type") == "xhttp" or q.get("flow") == "xtls-rprx-vision")
                 and q.get("pbk") and q.get("sni") and "sid" in q):
             if p.hostname == node_ip and p.port == 443:
                 fallback = q
@@ -463,6 +463,7 @@ try:
     if fp not in ("chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq"):
         fp = "chrome"
     print(json.dumps({"username": username, "uuid": client_id, "pbk": q["pbk"],
+        "network": q.get("type", "tcp"), "path": q.get("path", "/"), "mode": q.get("mode", "auto"), "flow": q.get("flow", ""),
         "sid": q["sid"], "sni": q["sni"], "fp": fp}))
 except Exception:
     api("DELETE", f"/api/user/{username}")
@@ -486,8 +487,8 @@ cfg = {"log": {"loglevel": "warning"},
   "inbounds": [{"port": 19999, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
   "outbounds": [{"protocol": "vless",
     "settings": {"vnext": [{"address": node_ip, "port": 443, "users": [
-      {"id": d["uuid"], "encryption": "none", "flow": "xtls-rprx-vision"}]}]},
-    "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
+      {"id": d["uuid"], "encryption": "none", "flow": d.get("flow", "")}]}]},
+    "streamSettings": {"network": d["network"], **({"xhttpSettings": {"path": d["path"], "mode": d["mode"]}} if d["network"] == "xhttp" else {}), "security": "reality", "realitySettings": {
       "serverName": d["sni"], "fingerprint": d["fp"], "publicKey": d["pbk"],
       "shortId": d["sid"], "spiderX": "/"}}}]}
 json.dump(cfg, open("/dev/stdout", "w"))

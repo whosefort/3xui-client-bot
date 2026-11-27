@@ -171,7 +171,8 @@ ssh root@мастер 'MON_DOMAIN=mon.ваш-домен.tld SUB_DOMAIN=sub.ва�
       "protocol": "vless",
       "settings": { "clients": [], "decryption": "none" },
       "streamSettings": {
-        "network": "tcp",
+        "network": "xhttp",
+        "xhttpSettings": {"path": "/sync", "mode": "auto"},
         "security": "reality",
         "realitySettings": {
           "show": false,

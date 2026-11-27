@@ -190,7 +190,10 @@ class PresetTests(unittest.IsolatedAsyncioTestCase):
 
         panel._request = AsyncMock(side_effect=request)
         panel.list_inbounds = AsyncMock(side_effect=[[{"port": 24443}], [{"port": 24443}, generated]])
-        result = await add_reality_preset(panel, "auto")
+        result = await add_reality_preset(panel, "auto", transport="xhttp", mode="stream-up")
+        self.assertTrue(result["disableFlow"])
+        self.assertEqual(result["streamSettings"]["xhttpSettings"]["mode"], "stream-up")
+        self.assertTrue(result["streamSettings"]["xhttpSettings"]["path"].startswith("/sync/"))
         reality = generated["streamSettings"]["realitySettings"]
         self.assertEqual(result["port"], 24444)
         self.assertEqual(reality["target"], "www.cisco.com:443")

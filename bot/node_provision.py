@@ -225,6 +225,7 @@ async def create_verify_client() -> dict | None:
     return {
         "username": username,
         "uuid": client_id,
+        "network": q.get("type", "tcp"), "path": q.get("path", "/"), "mode": q.get("mode", "auto"), "flow": q.get("flow", ""),
         "pbk": q.get("pbk"),
         "sid": q.get("sid"),
         "sni": q.get("sni"),

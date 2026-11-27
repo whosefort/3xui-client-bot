@@ -120,9 +120,9 @@ async def verify_reality_tunnel(address: str, client: dict, *, user: str = "root
         "outbounds": [{
             "protocol": "vless",
             "settings": {"vnext": [{"address": address, "port": 443, "users": [
-                {"id": client["uuid"], "encryption": "none", "flow": "xtls-rprx-vision"}
+                {"id": client["uuid"], "encryption": "none", "flow": client.get("flow", "")}
             ]}]},
-            "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
+            "streamSettings": {"network": client["network"], **({"xhttpSettings": {"path": client["path"], "mode": client["mode"]}} if client["network"] == "xhttp" else {}), "security": "reality", "realitySettings": {
                 "serverName": client["sni"], "fingerprint": client.get("fp") or "chrome",
                 "publicKey": client["pbk"], "shortId": client["sid"], "spiderX": "/",
             }},

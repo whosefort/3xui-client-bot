@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import subprocess
 import time
 from pathlib import Path
@@ -60,8 +61,8 @@ def get_inbound(panel):
     if inbound.get("settings", {}).get("clients"):
         raise RuntimeError("Список clients в конфиге выделенного инбаунда должен быть пуст.")
     stream = inbound.get("streamSettings", {})
-    if stream.get("security") != "reality" or stream.get("network", "tcp") not in ("tcp", "raw"):
-        raise RuntimeError("Автосетап ожидает VLESS/TCP с REALITY.")
+    if stream.get("security") != "reality" or stream.get("network", "tcp") not in ("tcp", "raw", "xhttp"):
+        raise RuntimeError("Автосетап ожидает VLESS TCP/XHTTP с REALITY.")
     if inbound["port"] != 443:
         raise RuntimeError("Проверка туннеля в bootstrap рассчитана на порт 443.")
     reality = stream.get("realitySettings", {})
@@ -70,7 +71,7 @@ def get_inbound(panel):
     return inbound["tag"]
 
 
-def issue_link(panel, username, inbound, node_ip):
+def issue_link(panel, username, inbound, node_ip, transport):
     user_id = str(uuid4())
     body = {
         "username": username,
@@ -89,7 +90,8 @@ def issue_link(panel, username, inbound, node_ip):
                 continue
             params = parse_qs(parsed.query, keep_blank_values=True)
             if (parsed.username == user_id and params.get("security") == ["reality"]
-                    and params.get("flow") == ["xtls-rprx-vision"]
+                    and ((transport == "tcp" and params.get("flow") == ["xtls-rprx-vision"])
+                         or (transport == "xhttp" and params.get("type") == ["xhttp"] and not any(params.get("flow", []))))
                     and params.get("sni", [""])[0] and params.get("pbk", [""])[0]
                     and "sid" in params):
                 return link
@@ -109,6 +111,8 @@ def main():
     mode.add_argument("--username", help="Создать одного клиента с этим именем")
     mode.add_argument("--node-only", action="store_true", help="Подготовить ноду для выдачи доступа через бота")
     parser.add_argument("--xray-version", default="v26.11.9")
+    parser.add_argument("--transport", choices=("tcp", "xhttp"), default="xhttp")
+    parser.add_argument("--xhttp-mode", choices=("auto", "stream-up", "stream-one", "packet-up"), default="auto")
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -143,6 +147,19 @@ def main():
     panel.headers["Authorization"] = "Bearer " + token
     check_isolation(panel)
     inbound = get_inbound(panel)
+    cfg = panel.request("/api/core/config")
+    stream = cfg["inbounds"][0]["streamSettings"]
+    if args.transport == "xhttp":
+        stream.pop("tcpSettings", None)
+        stream.pop("rawSettings", None)
+        stream["xhttpSettings"] = {"mode": args.xhttp_mode, "path": "/sync/" + secrets.token_hex(8)}
+    else:
+        stream.pop("xhttpSettings", None)
+    stream["network"] = args.transport
+    check_isolation(panel)
+    panel.request("/api/core/config", "PUT", json.dumps(cfg).encode())
+    if panel.request("/api/core/config") != cfg:
+        raise RuntimeError("Панель не подтвердила настройки первого входа.")
 
     env = {
         **os.environ,
@@ -179,7 +196,7 @@ def main():
     if args.node_only:
         print(f"Нода проверена. Укажите PRIVATE_MARZBAN_INBOUND={inbound} в настройках бота.")
     else:
-        print(issue_link(panel, args.username, inbound, node_ip))
+        print(issue_link(panel, args.username, inbound, node_ip, args.transport))
 
 
 if __name__ == "__main__":

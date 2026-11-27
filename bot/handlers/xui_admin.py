@@ -236,6 +236,17 @@ async def manage(query: CallbackQuery, state: FSMContext) -> None:
             )
             return
         if action == "bootstrap":
+            await state.clear()
+            await _show(message, "Первый вход новой 3x-ui. Выберите транспорт и режим.",
+                        [(label, "bootmode:" + value) for label, value in (
+                            ("XHTTP · авто (по умолчанию)", "auto"), ("XHTTP · stream-up", "stream-up"),
+                            ("XHTTP · stream-one", "stream-one"), ("XHTTP · packet-up", "packet-up"),
+                            ("TCP · Vision", "tcp"))])
+            return
+        if action == "bootmode":
+            if args[0] not in ("auto", "stream-up", "stream-one", "packet-up", "tcp"):
+                raise PanelError("Неизвестный режим.")
+            await state.update_data(bootstrap_mode=args[0])
             await state.set_state(XUIInput.bootstrap)
             await message.answer(
                 "Пришлите в одной строке идентификатор, IPv4, SSH-порт и при желании DNS-имя "
@@ -577,6 +588,8 @@ async def bootstrap_panel(message: Message, state: FSMContext) -> None:
         return
     key, host, port, *domains = values
     domain = domains[0] if domains else ""
+    mode = (await state.get_data()).get("bootstrap_mode", "auto")
+    transport = "tcp" if mode == "tcp" else "xhttp"
     # Receive the bot username before creating an invitation on the VPS.
     bot_name = (await runtime.get_bot().me()).username
     await state.clear()
@@ -584,12 +597,13 @@ async def bootstrap_panel(message: Message, state: FSMContext) -> None:
     try:
         await xui_bootstrap.setup(key, host, int(port), domain)
         panel = runtime.panel_for(key)
-        inbound = await add_reality_preset(panel, "auto", listen_port=24443)
+        inbound = await add_reality_preset(panel, "auto", listen_port=24443, transport=transport,
+                                           mode="auto" if transport == "tcp" else mode)
         async with binding_lock, panel.config_lock:
             client = await create_named_client(panel, 0, config.plan_days, get_traffic_gb(), inbound["id"],
                                                username="client_" + uuid4().hex[:24])
             try:
-                await xui_bootstrap.verify_subscription(client.sub_url, inbound["port"])
+                await xui_bootstrap.verify_subscription(client.sub_url, inbound["port"], transport)
                 token = db.create_client_invite(client.username, key)
             except Exception:
                 await panel.delete_client(client.username)

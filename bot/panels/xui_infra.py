@@ -147,15 +147,22 @@ async def pick_reality_target(panel: XUIClient, preset: str) -> str:
     return host
 
 
-async def add_reality_preset(panel: XUIClient, preset: str, *, listen_port: int | None = None) -> dict:
+async def add_reality_preset(panel: XUIClient, preset: str, *, listen_port: int | None = None,
+                             transport: str = "tcp", mode: str = "auto") -> dict:
+    if transport not in ("tcp", "xhttp") or mode not in ("auto", "stream-one", "stream-up", "packet-up"):
+        raise PanelError("Некорректный транспорт или режим XHTTP.")
     async with panel.config_lock:
         existing = await panel.list_inbounds()
-        label = "VLESS REALITY · " + preset
+        label = ("VLESS XHTTP · " if transport == "xhttp" else "VLESS REALITY · ") + preset
         previous = next((row for row in existing if row.get("remark") == label), None)
         if previous is not None:
             stream = previous.get("streamSettings", {})
             if previous.get("protocol") != "vless" or stream.get("security") != "reality":
                 raise PanelError("Название пресета уже занято другим входом.")
+            if stream.get("network", "tcp") not in (("tcp", "raw") if transport == "tcp" else ("xhttp",)):
+                raise PanelError("У существующего пресета другой транспорт.")
+            if transport == "xhttp" and stream.get("xhttpSettings", {}).get("mode", "auto") != mode:
+                raise PanelError("У существующего пресета другой режим XHTTP.")
             if listen_port is not None and previous.get("port") != listen_port:
                 raise PanelError("Пресет уже создан на другом порту.")
             return previous
@@ -171,7 +178,10 @@ async def add_reality_preset(panel: XUIClient, preset: str, *, listen_port: int 
         response = await panel._request("POST", "/panel/api/inbounds/add", json_body={
             "remark": label, "listen": "", "port": port, "enable": True, "protocol": "vless",
             "settings": {"clients": [], "decryption": "none"},
-            "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
+            "disableFlow": transport == "xhttp",
+            "streamSettings": {"network": transport, "security": "reality",
+                               **({"xhttpSettings": {"mode": mode, "path": "/sync/" + secrets.token_hex(8)}}
+                                  if transport == "xhttp" else {}), "realitySettings": {
                 "target": host + ":443", "serverNames": [host], "xver": 0,
                 "privateKey": keys["privateKey"], "shortIds": [secrets.token_hex(8)],
                 "settings": {"publicKey": keys["publicKey"], "fingerprint": "chrome"},

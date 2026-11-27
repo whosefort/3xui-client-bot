@@ -10,7 +10,7 @@ import re
 import shlex
 import socket
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import aiohttp
 import asyncssh
@@ -90,19 +90,30 @@ async def setup(key: str, address: str, port: int, domain: str = "") -> None:
                 await asyncio.sleep(5)
 
 
-async def verify_subscription(url: str, port: int) -> None:
+async def verify_subscription(url: str, port: int, transport: str = "tcp") -> None:
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             async with session.get(url, headers={"User-Agent": "Happ/3.0"},
                                    allow_redirects=False) as response:
                 if response.status != 200:
                     raise PanelError("HTTPS-ссылка подписки не открывается.")
-                body = (await response.read()).strip()
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(16384):
+                    body.extend(chunk)
+                    if len(body) > 256 * 1024:
+                        raise PanelError("Слишком большой ответ подписки.")
+                body = bytes(body).strip()
         if not body.startswith(b"vless://"):
             body = base64.b64decode(body + b"=" * (-len(body) % 4), validate=True)
         links = (urlsplit(line) for line in body.decode().splitlines() if line.startswith("vless://"))
-        if any(link.port == port and link.hostname for link in links):
-            return
+        for link in links:
+            query = parse_qs(link.query)
+            network = query.get("type", ["tcp"])[0]
+            if (link.port == port and link.hostname == urlsplit(url).hostname
+                    and query.get("security") == ["reality"]
+                    and ((transport == "tcp" and network in ("raw", "tcp"))
+                         or (transport == network == "xhttp" and query.get("path") and not query.get("flow")))):
+                return
     except (aiohttp.ClientError, TimeoutError, ValueError, binascii.Error):
         pass
     raise PanelError("Подписка не вернула VLESS-профиль на порту первого входа.")

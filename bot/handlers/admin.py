@@ -1307,6 +1307,7 @@ async def kb_add_server(message: Message, state: FSMContext) -> None:
     await message.answer(
         "🖥 Пришли <b>публичный IP</b> новой ноды. Можно через пробел добавить имя:\n"
         "<code>203.0.113.10 eu-frankfurt-02</code>\n\n"
+        "Нода наследует транспорт и режим мастера Marzban. Для отдельного TCP/Vision или другого режима XHTTP используйте выделенную панель.\n"
         "По умолчанию образ marzban-node — зафиксированная стабильная версия, "
         "xray-core — пин из node/XRAY_VERSION (может быть pre-release). "
         "Ключевые слова (в любом месте, через пробел):\n"
